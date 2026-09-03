@@ -56,6 +56,10 @@ function buildTruckBucketPlan_(items, year, month, weekday, holidaySet, capaInfo
   // 이번 실행 중 이 업체가 실제로 쓴 모든 날짜의 버킷(cap=truckKg 그대로) — 자투리 마무리 때 새 날짜를
   // 여는 대신 이미 확보해둔 날짜 중 여유 있는 곳부터 채우기 위함.
   const companyBuckets = {};
+  // 이 업체가 각 날짜에 대해 vendorDateLoad에 마지막으로 반영한 트럭대수 — 소량 자투리 병합 때
+  // "얼마를 더하고 뺐는지"를 라이브 버킷 값이 아니라 이 값 기준으로 계산해야, 다른 업체 몫을
+  // 잘못 갉아먹지 않는다(라이브 버킷은 vendorDateLoad에 아직 안 올라간 초과배정을 포함할 수 있음).
+  const vendorTrucksReported = {};
 
   function getBucket(date) {
     const key = dateKey_(date);
@@ -65,16 +69,17 @@ function buildTruckBucketPlan_(items, year, month, weekday, holidaySet, capaInfo
   }
 
   // 품목코드별 생산capa 제약이 걸리는 날짜만 걸러내는 필터. capa 정보 없는 품목은 필터링 없이 그대로 통과.
+  // 이번 주 후보 중 capa가 열린 날짜가 하나도 없으면(예전엔 여기서 capa 무시하고 아무 날짜나 썼음)
+  // 빈 배열을 그대로 반환한다 — 호출부가 "이번 주는 건너뛰고 다음 주(그만큼 더 생산된 뒤)로 미룬다".
   function productionFiltered(it, weekBuckets) {
     const curveFn = buildCapaCumulativeFn_(capaInfo, it.code, year, month, holidaySet);
     if (!curveFn) return weekBuckets;
     const codeLoad = codeDateLoad[it.code] || (codeDateLoad[it.code] = {});
-    const filtered = weekBuckets.filter(b => {
+    return weekBuckets.filter(b => {
       const cap = curveFn(b.date);
       const used = codeLoad[dateKey_(b.date)] || 0;
       return used + it.unitWeight <= cap;
     });
-    return filtered.length > 0 ? filtered : weekBuckets;
   }
   function recordCodeLoad(it, key, kg) {
     const curveFn = buildCapaCumulativeFn_(capaInfo, it.code, year, month, holidaySet);
@@ -156,11 +161,13 @@ function buildTruckBucketPlan_(items, year, month, weekday, holidaySet, capaInfo
       pending.forEach(it => {
         if (it.remaining <= 0 || weekRemain <= 0) return;
         ensureRoom(it);
-        const picked = pickBucket(productionFiltered(it, weekBuckets), it.unitWeight, it.dateMap);
+        const capaCandidates = productionFiltered(it, weekBuckets);
+        if (capaCandidates.length === 0) return; // 이번 주는 생산capa가 전혀 안 열림 — 억지로 배정하지 않고 다음 주로 미룸
+        const picked = pickBucket(capaCandidates, it.unitWeight, it.dateMap);
         const best = picked.bucket;
 
-        // picked가 진짜 여유 있는 자리가 아니라 최후수단 fallback이면(생산capa 필터로 후보가 줄어든
-        // 것일 수 있음), 트럭 자리 기준(raw weekBuckets)으로는 진짜 여유가 있는지 다시 확인해서,
+        // picked가 진짜 여유 있는 자리가 아니라 최후수단 fallback이면(트럭 자리가 다 찼을 수 있음),
+        // 트럭 자리 기준(raw weekBuckets)으로는 진짜 여유가 있는지 다시 확인해서,
         // 있으면 이번 차례는 그냥 건너뛴다(억지로 트럭 1대를 넘기지 않음).
         const trulyFits = _floorToUnit_(Math.min(best.cap, best.cap - best.load), it.unitWeight) > 0;
         if (!trulyFits) {
@@ -187,7 +194,9 @@ function buildTruckBucketPlan_(items, year, month, weekday, holidaySet, capaInfo
     weekBuckets.forEach(b => {
       if (b.load <= 0) return;
       const key = dateKey_(b.date);
-      vendorDateLoad[key] = (vendorDateLoad[key] || 0) + Math.ceil(b.load / CONFIG.TRUCK_KG);
+      const trucks = Math.ceil(b.load / CONFIG.TRUCK_KG);
+      vendorDateLoad[key] = (vendorDateLoad[key] || 0) + trucks;
+      vendorTrucksReported[key] = trucks;
     });
   });
 
@@ -209,7 +218,9 @@ function buildTruckBucketPlan_(items, year, month, weekday, holidaySet, capaInfo
     allBuckets.forEach(b => {
       if (b.load <= 0) return;
       const key = dateKey_(b.date);
-      vendorDateLoad[key] = (vendorDateLoad[key] || 0) + Math.ceil(b.load / CONFIG.TRUCK_KG);
+      const trucks = Math.ceil(b.load / CONFIG.TRUCK_KG);
+      vendorDateLoad[key] = (vendorDateLoad[key] || 0) + trucks;
+      vendorTrucksReported[key] = trucks;
     });
   }
 
@@ -227,15 +238,84 @@ function buildTruckBucketPlan_(items, year, month, weekday, holidaySet, capaInfo
     }
     if (candidates.length === 0) candidates = [{ date: baseDates[baseDates.length - 1], load: 0, cap: truckKg }];
 
+    // 여기서도 capa가 열려있는 날짜가 있으면 그쪽을 우선한다 — 정말 하나도 없을 때만(월말까지 가도
+    // 생산이 못 따라온 경우) capa를 무시하고 배정해서 최소한 이번 달에 나가긴 나가게 한다.
+    const curveFn = buildCapaCumulativeFn_(capaInfo, it.code, year, month, holidaySet);
+    let pickCandidates = candidates;
+    if (curveFn) {
+      const codeLoad = codeDateLoad[it.code] || (codeDateLoad[it.code] = {});
+      const capaOk = candidates.filter(b => (codeLoad[dateKey_(b.date)] || 0) + it.unitWeight <= curveFn(b.date));
+      if (capaOk.length > 0) pickCandidates = capaOk;
+    }
+
     const roundedRemain = _roundToUnit_(it.remaining, it.unitWeight);
     if (roundedRemain > 0) {
-      const picked = pickBucket(candidates, it.unitWeight, it.dateMap);
+      const picked = pickBucket(pickCandidates, it.unitWeight, it.dateMap);
       const key = dateKey_(picked.bucket.date);
       it.dateMap[key] = (it.dateMap[key] || 0) + roundedRemain;
       picked.bucket.load += roundedRemain;
       recordCodeLoad(it, key, roundedRemain);
     }
     it.remaining = 0;
+  });
+
+  // ③ 소량 자투리 병합: 배정이 다 끝난 뒤, 어떤 날짜의 배정량이 트럭 절반(MIN_SHIPMENT_KG)보다
+  // 작으면 그 품목의 다음(더 나중) 배정일로 합친다. capa는 시간이 지날수록만 커지므로 "앞으로만"
+  // 옮기는 건 항상 안전하다 — 뒤로 옮기면 그 이전 시점 capa를 넘길 수 있어서 하지 않는다. 트럭
+  // 상한이나 생산capa를 넘기게 되면 합치지 않고 그대로 둔다(억지로 옮기지 않음).
+  // unitWeight가 없는 품목은 companyBuckets가 아니라 별도의 allBuckets를 썼으므로(위 "단위중량을
+  // 모르는 품목" 블록) companyBuckets에는 이 품목의 진짜 부하가 반영돼 있지 않다 — 그런 품목을
+  // 여기서 건드리면 companyBuckets를 실제와 다르게 오염시키게 되므로 대상에서 제외한다.
+  itemState.filter(it => it.unitWeight > 0).forEach(it => {
+    const curveFn = buildCapaCumulativeFn_(capaInfo, it.code, year, month, holidaySet);
+    const codeLoad = curveFn ? (codeDateLoad[it.code] || (codeDateLoad[it.code] = {})) : null;
+
+    const keys = Object.keys(it.dateMap).sort();
+    for (let i = 0; i < keys.length - 1; i++) {
+      const sourceKey = keys[i];
+      const amount = it.dateMap[sourceKey];
+      if (!amount || amount >= CONFIG.MIN_SHIPMENT_KG) continue;
+
+      const targetKey = keys[i + 1];
+      const targetBucket = companyBuckets[targetKey];
+      if (!targetBucket) continue; // 이론상 항상 있어야 하지만 방어적으로
+      if (targetBucket.load + amount > targetBucket.cap) continue; // 트럭 상한 초과 — 합치지 않음
+
+      if (curveFn) {
+        const targetCap = curveFn(targetBucket.date);
+        const targetUsed = codeLoad[targetKey] || 0;
+        if (targetUsed + amount > targetCap) continue; // 생산capa 초과 — 합치지 않음
+      }
+
+      const sourceBucket = companyBuckets[sourceKey];
+
+      it.dateMap[targetKey] = (it.dateMap[targetKey] || 0) + amount;
+      delete it.dateMap[sourceKey];
+      if (sourceBucket) sourceBucket.load -= amount;
+      targetBucket.load += amount;
+      if (codeLoad) {
+        codeLoad[targetKey] = (codeLoad[targetKey] || 0) + amount;
+        if (codeLoad[sourceKey] !== undefined) {
+          codeLoad[sourceKey] -= amount;
+          if (codeLoad[sourceKey] <= 0.0001) delete codeLoad[sourceKey];
+        }
+      }
+
+      // vendorDateLoad는 이 업체가 "마지막으로 보고한" 트럭대수(vendorTrucksReported) 기준으로만
+      // 델타를 적용한다 — 라이브 버킷값을 기준으로 하면, 이 버킷에 최후수단으로 트럭 상한을 넘겨서
+      // 강제 배정된(그러나 아직 vendorDateLoad에 반영 안 된) 몫까지 함께 계산에 끼어들어 다른
+      // 업체 몫을 잘못 갉아먹을 수 있다.
+      const afterSourceTrucks = sourceBucket ? Math.ceil(Math.max(0, sourceBucket.load) / truckKg) : 0;
+      const afterTargetTrucks = Math.ceil(targetBucket.load / truckKg);
+      if (sourceBucket) {
+        const beforeSourceTrucks = vendorTrucksReported[sourceKey] || 0;
+        vendorDateLoad[sourceKey] = Math.max(0, (vendorDateLoad[sourceKey] || 0) - beforeSourceTrucks + afterSourceTrucks);
+        vendorTrucksReported[sourceKey] = afterSourceTrucks;
+      }
+      const beforeTargetTrucks = vendorTrucksReported[targetKey] || 0;
+      vendorDateLoad[targetKey] = Math.max(0, (vendorDateLoad[targetKey] || 0) - beforeTargetTrucks + afterTargetTrucks);
+      vendorTrucksReported[targetKey] = afterTargetTrucks;
+    }
   });
 
   const plan = {};
@@ -338,7 +418,7 @@ function _weekScopedExtraDates_(baseDate, count, existingDates, vendorDateLoad, 
 
   const scored = candidates.map(d => {
     const trucksUsed = vendorDateLoad[dateKey_(d)] || 0;
-    return { date: d, isLight: trucksUsed <= CONFIG.LIGHT_DAY_TRUCK_THRESHOLD, load: trucksUsed };
+    return { date: d, isLight: trucksUsed < CONFIG.LIGHT_DAY_TRUCK_THRESHOLD, load: trucksUsed };
   });
   scored.sort((a, b) => {
     if (a.isLight !== b.isLight) return a.isLight ? -1 : 1;
@@ -352,14 +432,21 @@ function _weekScopedExtraDates_(baseDate, count, existingDates, vendorDateLoad, 
     return chosenTimes.some(ct => Math.abs(ct - t) <= ONE_DAY_MS);
   }
 
+  // "가벼운 날"이 최우선 기준이다 — 이미 다른 업체로 꽉 찬 날은, 기준일과 하루밖에 안 떨어진 날보다도
+  // 뒤로 밀려야 한다. 그래서 가벼운 후보군 안에서 먼저 "하루 이상 떨어진 날"을 고르고, 그래도 count를
+  // 못 채우면 가벼운 후보군의 "가까운 날"로 채우고, 가벼운 후보가 아예 없을 때만 무거운 후보로 넘어간다.
   const result = [];
-  const leftover = [];
-  scored.forEach(s => {
-    if (result.length >= count) { leftover.push(s); return; }
-    const t = s.date.getTime();
-    if (!isTooClose(t)) { result.push(s.date); chosenTimes.push(t); } else leftover.push(s);
-  });
-  for (let j = 0; result.length < count && j < leftover.length; j++) result.push(leftover[j].date);
+  function fillFrom(pool) {
+    const far = pool.filter(s => !isTooClose(s.date.getTime()));
+    const close = pool.filter(s => isTooClose(s.date.getTime()));
+    far.concat(close).forEach(s => {
+      if (result.length >= count) return;
+      result.push(s.date);
+      chosenTimes.push(s.date.getTime());
+    });
+  }
+  fillFrom(scored.filter(s => s.isLight));
+  if (result.length < count) fillFrom(scored.filter(s => !s.isLight));
 
   result.sort((a, b) => a - b);
   return result;

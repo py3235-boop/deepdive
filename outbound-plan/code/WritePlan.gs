@@ -1,6 +1,6 @@
 /**
  * 출고계획 결과를 시트에 쓴다.
- * rows: [{ code, spec, vendor, dateMap: {'yyyy-MM-dd': qty} }, ...]
+ * rows: [{ code, spec, vendor, orderedQty(발주량), dateMap: {'yyyy-MM-dd': qty} }, ...]
  * meta: { holidaySet(Set), issueCount(검증 경고 건수), viewMode('item'|'vendor') }
  *
  * viewMode:
@@ -12,6 +12,9 @@
  * CONFIG.PLAN_SHEET_NAME("출고계획")에 그대로 덮어쓴다 — 유일하게 남은 탭일 수 있어서 삭제 후
  * 재생성이 안 되므로(구글시트는 마지막 탭 삭제 불가), 삭제/재생성 대신 clear()로 내용만 지우고
  * 같은 탭에 다시 쓴다. 이름이 그새 바뀌어서 못 찾으면 첫 번째 탭을 그대로 쓴다.
+ *
+ * 파일 이름 자체도 매번 "N월_출고계획(통합)"으로 맞춘다 — 뒤 파트가 폴더명이 아니라 이 파일명
+ * 패턴으로 출고계획 파일을 찾기 때문에, 시트 안 제목 셀만으로는 안 되고 파일명이 실제로 이래야 한다.
  */
 
 function writePlanSheet(year, month, rows, meta) {
@@ -23,6 +26,9 @@ function writePlanSheet(year, month, rows, meta) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheetName = CONFIG.PLAN_SHEET_NAME;
 
+  const fileName = month + '월_출고계획(통합)';
+  if (ss.getName() !== fileName) ss.rename(fileName);
+
   const sheet = ss.getSheetByName(sheetName) || ss.getSheets()[0];
   sheet.clear();
   sheet.getRange(1, 1).breakApart(); // 이전 실행에서 남아있을 수 있는 병합 셀 해제
@@ -32,14 +38,16 @@ function writePlanSheet(year, month, rows, meta) {
 
   const totalDays = daysInMonth_(year, month);
   const dateKeys = [];
-  const header = ['품목코드', '규격', '구분(업체)', '합계'];
+  const header = ['품목코드', '규격', '구분(고객사)', '발주량', '합계'];
   for (let d = 1; d <= totalDays; d++) {
     const date = new Date(year, month - 1, d);
     dateKeys.push(dateKey_(date));
     header.push(formatDayLabel_(d));
   }
 
-  const firstDateCol = 5; // E열부터 날짜
+  const orderedQtyCol = 4; // D열: 발주량
+  const totalCol = 5; // E열: 합계
+  const firstDateCol = 6; // F열부터 날짜
   const totalCols = header.length;
 
   // --- 행 배치: 1행 제목, 2행 헤더, 3행부터 데이터 ---
@@ -85,14 +93,16 @@ function writePlanSheet(year, month, rows, meta) {
       line[0] = row.code;
       line[1] = row.spec;
       line[2] = row.vendor;
+      line[orderedQtyCol - 1] = row.orderedQty != null ? row.orderedQty : '';
       dateKeys.forEach((key, i) => {
         const qty = row.dateMap[key];
         line[firstDateCol - 1 + i] = qty ? qty : '';
       });
 
       sheet.getRange(cursor, 1, 1, totalCols).setValues([line]).setHorizontalAlignment('center');
+      sheet.getRange(cursor, orderedQtyCol).setNumberFormat('#,##0');
       sheet.getRange(cursor, firstDateCol, 1, totalDays).setNumberFormat('#,##0');
-      sheet.getRange(cursor, 4).setNumberFormat('#,##0').setFormula(
+      sheet.getRange(cursor, totalCol).setNumberFormat('#,##0').setFormula(
         '=SUM(' + sheet.getRange(cursor, firstDateCol, 1, totalDays).getA1Notation() + ')'
       );
       // 신규/변경 발주량(발주스냅샷 대비) — 합계·날짜별 배정값까지 포함해서 그 품목 행 전체를 강조
@@ -107,8 +117,11 @@ function writePlanSheet(year, month, rows, meta) {
       const subtotalLine = new Array(totalCols).fill('');
       subtotalLine[2] = block.vendor + ' 소계';
       sheet.getRange(cursor, 1, 1, totalCols).setValues([subtotalLine]);
-      sheet.getRange(cursor, 4).setFormula(
-        '=SUM(' + sheet.getRange(blockStartRow, 4, blockEndRow - blockStartRow + 1, 1).getA1Notation() + ')'
+      sheet.getRange(cursor, orderedQtyCol).setFormula(
+        '=SUM(' + sheet.getRange(blockStartRow, orderedQtyCol, blockEndRow - blockStartRow + 1, 1).getA1Notation() + ')'
+      );
+      sheet.getRange(cursor, totalCol).setFormula(
+        '=SUM(' + sheet.getRange(blockStartRow, totalCol, blockEndRow - blockStartRow + 1, 1).getA1Notation() + ')'
       );
       for (let c = firstDateCol; c < firstDateCol + totalDays; c++) {
         sheet.getRange(cursor, c).setFormula(
@@ -116,7 +129,8 @@ function writePlanSheet(year, month, rows, meta) {
         );
       }
       sheet.getRange(cursor, firstDateCol, 1, totalDays).setNumberFormat('#,##0');
-      sheet.getRange(cursor, 4).setNumberFormat('#,##0');
+      sheet.getRange(cursor, orderedQtyCol).setNumberFormat('#,##0');
+      sheet.getRange(cursor, totalCol).setNumberFormat('#,##0');
       sheet.getRange(cursor, 1, 1, totalCols).setFontWeight('bold').setHorizontalAlignment('center');
       cursor++;
     }
@@ -133,14 +147,16 @@ function writePlanSheet(year, month, rows, meta) {
       const sum = rows.reduce((s, row) => s + (row.dateMap[key] || 0), 0);
       totalLine[firstDateCol - 1 + i] = sum || '';
     });
-    totalLine[3] = rows.reduce((s, row) => {
+    totalLine[orderedQtyCol - 1] = rows.reduce((s, row) => s + (row.orderedQty || 0), 0);
+    totalLine[totalCol - 1] = rows.reduce((s, row) => {
       return s + dateKeys.reduce((s2, key) => s2 + (row.dateMap[key] || 0), 0);
     }, 0);
   }
   sheet.getRange(totalRow, 1, 1, totalCols).setValues([totalLine]);
   if (hasData) {
     sheet.getRange(totalRow, firstDateCol, 1, totalDays).setNumberFormat('#,##0');
-    sheet.getRange(totalRow, 4).setNumberFormat('#,##0');
+    sheet.getRange(totalRow, orderedQtyCol).setNumberFormat('#,##0');
+    sheet.getRange(totalRow, totalCol).setNumberFormat('#,##0');
   }
   sheet.getRange(totalRow, 1, 1, totalCols).setFontWeight('bold').setHorizontalAlignment('center');
 
@@ -172,17 +188,18 @@ function writePlanSheet(year, month, rows, meta) {
     sheet.getRange(warningRow, 1).setValue('✓ 검증 경고 없음');
   }
 
-  // 열 수가 많아서(메타 4열 + 날짜 최대 31열) 자동맞춤 대신 고정 폭으로 압축해 한 화면에 들어오게 함
+  // 열 수가 많아서(메타 5열 + 날짜 최대 31열) 자동맞춤 대신 고정 폭으로 압축해 한 화면에 들어오게 함
   sheet.getRange(headerRow, 1, totalRow - headerRow + 1, totalCols).setFontSize(9);
   sheet.setColumnWidth(1, 85); // 품목코드
   sheet.setColumnWidth(2, 75); // 규격
-  sheet.setColumnWidth(3, 65); // 구분(업체)
-  sheet.setColumnWidth(4, 65); // 합계
+  sheet.setColumnWidth(3, 65); // 구분(고객사)
+  sheet.setColumnWidth(orderedQtyCol, 70); // 발주량
+  sheet.setColumnWidth(totalCol, 65); // 합계
   sheet.setColumnWidths(firstDateCol, totalDays, 40); // 날짜 칸은 전부 좁게 통일
   sheet.setRowHeights(dataStartRow, totalRow - dataStartRow + 1, 20);
 
   sheet.setFrozenRows(headerRow);
-  sheet.setFrozenColumns(4);
+  sheet.setFrozenColumns(totalCol);
 }
 
 /**
@@ -210,4 +227,41 @@ function _buildDisplayBlocks_(rows, viewMode) {
   // 'item' 보기: 배너 없이 규격순 정렬
   const sorted = rows.slice().sort((a, b) => (a.spec + a.code).localeCompare(b.spec + b.code));
   return [{ vendor: null, items: sorted }];
+}
+
+/**
+ * "출고계획 보기" 메뉴 — 재계산 없이 마지막에 생성한 계획(LAST_PLAN)을 다른 배치로 다시 그린다.
+ * generatePlan()이 매번 문서 속성(DocumentProperties)에 저장해둔 값을 읽어서 쓰므로,
+ * 발주서를 다시 읽거나 트럭버킷 계산을 다시 돌리지 않는다.
+ */
+function showByVendor() {
+  _rebuildPlanLayout_('vendor');
+}
+
+function showByItem() {
+  _rebuildPlanLayout_('item');
+}
+
+function _rebuildPlanLayout_(viewMode) {
+  const raw = PropertiesService.getDocumentProperties().getProperty('LAST_PLAN');
+  if (!raw) {
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      '저장된 계획이 없습니다. 먼저 "② 계획 생성"을 한 번 실행하세요.', '안내', 6
+    );
+    return;
+  }
+
+  const saved = JSON.parse(raw);
+  const holidaySet = new Set(saved.holidayDates || []);
+
+  writePlanSheet(saved.year, saved.month, saved.rows, {
+    holidaySet: holidaySet,
+    issueCount: saved.issueCount || 0,
+    viewMode: viewMode,
+    actualCutoffDateKey: saved.actualCutoffDateKey || null,
+  });
+
+  SpreadsheetApp.getActiveSpreadsheet().toast(
+    (viewMode === 'vendor' ? '회사별 보기로 전환' : '품목별 보기로 전환') + ' 완료', '완료', 5
+  );
 }

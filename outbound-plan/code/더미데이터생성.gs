@@ -1,17 +1,16 @@
 /**
  * 발주서 형태를 흉내낸 테스트 파일("YYYY-MM 발주서(테스트)")을 별도 구글시트로 만들어
  * 드라이브의 전용 테스트 폴더에 저장하고, 그 폴더 ID를 스크립트 속성 ORDER_FOLDER_ID에 자동
- * 등록한다 — 대회구현가이드처럼 발주서가 출고계획 결과 파일과 분리된 별도 파일이어야 하기 때문.
+ * 등록한다 — 발주서가 출고계획 결과 파일과 분리된 별도 파일이어야 하기 때문.
  * 등록까지 자동으로 되므로 이 함수 실행 후 바로 generatePlan()을 돌리면 이 테스트 파일을 읽는다.
  *
- * 대회구현가이드 §2/§11-1 방식 그대로: 시트 1행에 '딥다이브' 마커, 2행에 헤더
- * (품목코드/규격/중량/납기일), 3행부터 데이터. 시트명은 '고객사 A' 형태로 지어야
- * vendor 인식(/고객사\s*([A-Za-z])/)이 된다.
+ * 시트 1행에 '딥다이브' 마커, 2행에 헤더(품목코드/규격/중량/납기일), 3행부터 데이터.
+ * 시트명은 '고객사 A' 형태로 지어야 vendor 인식(/고객사\s*([A-Za-z])/)이 된다.
  *
  * 품목코드/규격은 임의값이 아니라 기준정보.xlsx(CAPA/최대설비가동수/기초재고/적정재고)와
- * 제품 중량 (1).xlsx에 공통으로 들어있는 실제 코드 중에서 골랐다 — REFERENCE_FOLDER_ID를 연동했을
- * 때 단위중량 조회(WeightLookup.gs)와 생산capa 검증(ProductionCapa.gs)이 실제로 매칭돼서 동작하는지
- * 까지 같이 확인하기 위함이다.
+ * 제품 중량 (1).xlsx에 공통으로 들어있는 실제 품목코드 중에서 골랐다 — REFERENCE_FOLDER_ID를
+ * 연동했을 때 단위중량 조회(ReferenceFiles.gs)와 생산capa 검증(ProductionCapa.gs)이 실제로
+ * 매칭돼서 동작하는지까지 같이 확인하기 위함이다.
  */
 function createTestOrderStatus() {
   const today = new Date();
@@ -19,8 +18,8 @@ function createTestOrderStatus() {
   const m = today.getMonth(); // 0-based
   const fileName = Utilities.formatString('%d-%02d 발주서(테스트)', y, m + 1);
 
-  // 지금 VENDOR_TYPE_MAP은 A사=monday_bucket, B사=wednesday_bucket(둘 다 트럭버킷),
-  // C사=friday_even(단순 균등분배)이다. 어떤 타입도 납기일을 안 쓰므로(date_as_is를 쓰는 업체가
+  // 지금 VENDOR_TYPE_MAP은 고객사A=monday_bucket, 고객사B=wednesday_bucket(둘 다 트럭버킷),
+  // 고객사C=friday_even(단순 균등분배)이다. 어떤 타입도 납기일을 안 쓰므로(date_as_is를 쓰는 업체가
   // 없음) 납기일 칸은 전부 비워둔다.
   //
   // 규격을 여러 개 섞고, 업체끼리 같은 품목코드를 겹쳐서도 넣었다(1900190을 A/B 둘 다 씀) —

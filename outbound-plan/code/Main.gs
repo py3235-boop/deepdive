@@ -6,6 +6,7 @@ function generatePlan(year, month) {
     _generatePlan_(year, month);
   } catch (e) {
     appendExecutionLog_('generatePlan', '실패', e.message);
+    notifyChat_('🚨 출고계획 생성 실패: ' + e.message);
     throw e; // 편집기/시트에 원래 에러가 그대로 보이게 다시 던짐
   }
 }
@@ -24,6 +25,7 @@ function _generatePlan_(year, month) {
   const previousFingerprints = loadPreviousFingerprints_();
   if (fingerprintsUnchanged_(previousFingerprints, currentFingerprints)) {
     appendExecutionLog_('generatePlan', '스킵', '발주 데이터가 지난 실행과 동일 — 재계산 건너뜀');
+    notifyChat_('ℹ️ 출고계획: 발주서가 지난 실행과 동일해서 재계산을 건너뛰었습니다.');
     SpreadsheetApp.getActiveSpreadsheet().toast(
       '발주서가 지난 실행과 똑같아서 계획을 다시 만들지 않았습니다. 강제로 다시 만들려면 forceRegeneratePlan()을 실행하세요.',
       '스킵',
@@ -78,20 +80,25 @@ function _generatePlan_(year, month) {
       const result = buildTruckBucketPlan_(items, year, month, bucketWeekday, holidaySet, capaInfo, codeDateLoad, weights, null, vendorDateLoad);
       items.forEach(it => {
         const dateMap = result.plan[it.code + '|' + it.spec] || {};
-        rows.push({ code: it.code, spec: it.spec, vendor: vendor, dateMap: dateMap });
+        rows.push({ code: it.code, spec: it.spec, vendor: vendor, orderedQty: it.qty, dateMap: dateMap });
       });
       result.issues.forEach(i => allIssues.push(vendor + ' ' + i.code + ': ' + i.message));
     } else {
-      // 트럭버킷이 아닌 타입(friday_even 등)은 여기서 직접 vendorDateLoad를 갱신해야 함 — kg를 그대로
-      // 더하면 안 되고, 트럭버킷 쪽과 같은 기준(그 날짜 kg를 트럭 1대(TRUCK_KG)로 나눠 올림)으로
-      // "트럭 몇 대 분량인지"로 환산해서 더한다. 예: 하루 7,034kg → ceil(7034/5000) = 2대로 집계.
+      // 트럭버킷이 아닌 타입(friday_even 등)은 여기서 직접 vendorDateLoad를 갱신해야 함 — 품목별로
+      // 각각 올림해서 더하면(예: 2,789→1대 + 2,338→1대 + 1,913→1대 = 3대) 실제보다 부풀려진다.
+      // 이 업체가 그 날짜에 실은 kg 총합을 먼저 구한 뒤 그걸 한 번만 트럭 1대(TRUCK_KG)로 나눠
+      // 올려야 진짜 트럭 대수(예: 합계 7,040kg → 2대)가 된다.
+      const dateTotals = {};
       items.forEach(it => {
         const dateMap = allocateByType(type, it.orders, year, month, holidaySet, null, vendorDateLoad);
-        rows.push({ code: it.code, spec: it.spec, vendor: vendor, dateMap: dateMap });
+        rows.push({ code: it.code, spec: it.spec, vendor: vendor, orderedQty: it.qty, dateMap: dateMap });
         Object.keys(dateMap).forEach(key => {
-          const trucks = Math.ceil(dateMap[key] / CONFIG.TRUCK_KG);
-          vendorDateLoad[key] = (vendorDateLoad[key] || 0) + trucks;
+          dateTotals[key] = (dateTotals[key] || 0) + dateMap[key];
         });
+      });
+      Object.keys(dateTotals).forEach(key => {
+        const trucks = Math.ceil(dateTotals[key] / CONFIG.TRUCK_KG);
+        vendorDateLoad[key] = (vendorDateLoad[key] || 0) + trucks;
       });
     }
   });
@@ -129,6 +136,17 @@ function _generatePlan_(year, month) {
   const messages = [];
   if (unknownVendors.size > 0) messages.push('타입 매핑 없는 업체 제외: ' + Array.from(unknownVendors).join(', '));
   if (allIssues.length > 0) messages.push('검증 경고 ' + allIssues.length + '건 (실행이력 탭 참고)');
+
+  // 챗 알림에는 건수만이 아니라 몇 품목 중 몇 개가 신규/변경인지, 결과 시트 링크까지 넣어서
+  // 알림만 보고도 바로 클릭해서 확인할 수 있게 한다.
+  const changedCount = rows.filter(r => r.changed).length;
+  notifyChat_(
+    (messages.length ? '⚠️ ' : '📦 ') +
+    year + '년 ' + month + '월 출고계획 생성 완료\n' +
+    '품목 ' + rows.length + '개(신규/변경 ' + changedCount + '개)' +
+    (messages.length ? '\n' + messages.join('\n') : '') +
+    '\n' + SpreadsheetApp.getActiveSpreadsheet().getUrl()
+  );
 
   // 실행이력 탭에 남길 메시지 — 건수만이 아니라 실제 경고 내용을 그대로 적는다.
   const logLines = [];

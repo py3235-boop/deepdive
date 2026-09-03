@@ -1,11 +1,11 @@
 /**
- * 발주서를 읽어서 {업체, 품목코드, 규격, 수량, 납기일} 객체 배열로 반환한다 — 대회구현가이드 §2 방식.
+ * 발주서를 읽어서 {업체, 품목코드, 규격, 수량, 납기일} 객체 배열로 반환한다.
  *
  * CONFIG.ORDER_FOLDER_ID가 있으면 그 드라이브 폴더에서 'YYYY-MM 발주서' 파일을 찾아 읽고,
  * 없으면(테스트 모드) 이 스프레드시트 자체 안의 "고객사 A/B/C" 탭을 발주서로 간주한다.
  *
  * 한 발주서 파일 안에 업체별로 시트가 나뉘어 있고, 시트명이 '고객사 X' 패턴에 매치되면 그 알파벳을
- * "X사"로 매핑해서 업체를 판별한다. 각 시트는 1행에서 CONFIG.DEEP_DIVE_MARKER('딥다이브') 텍스트를
+ * "고객사X"로 매핑해서 업체를 판별한다. 각 시트는 1행에서 CONFIG.DEEP_DIVE_MARKER('딥다이브') 텍스트를
  * 찾아 그 열부터 표가 시작한다고 보고, 2행 헤더 텍스트로 품목코드/규격/중량/납기일 컬럼을 인식한다.
  */
 function loadOrderStatus() {
@@ -25,7 +25,7 @@ function loadOrderStatus() {
 
 function _detectVendorFromSheetName_(sheetName) {
   const m = sheetName.match(/고객사\s*([A-Za-z])/);
-  return m ? m[1].toUpperCase() + '사' : null;
+  return m ? '고객사' + m[1].toUpperCase() : null;
 }
 
 var _orderTempFileId_ = null;
@@ -53,13 +53,12 @@ function _resolveOrderSpreadsheet_() {
   }
 
   // xlsx 등은 구글시트 변환 사본을 임시로 만들어서 읽는다(고급 Drive 서비스 필요).
-  const converted = Drive.Files.insert(
-    { title: '__tmp_' + best.getName(), mimeType: MimeType.GOOGLE_SHEETS },
-    best.getBlob(),
-    { convert: true }
-  );
-  _orderTempFileId_ = converted.id;
-  return SpreadsheetApp.openById(converted.id);
+  // Drive API 고급 서비스는 v3가 붙으면 Files.insert가 없고 Files.create로 바뀌므로 둘 다 지원한다.
+  const tempFileId = Drive.Files.create
+    ? Drive.Files.create({ name: '__tmp_' + best.getName(), mimeType: MimeType.GOOGLE_SHEETS }, best.getBlob()).id // v3
+    : Drive.Files.insert({ title: '__tmp_' + best.getName(), mimeType: MimeType.GOOGLE_SHEETS }, best.getBlob(), { convert: true }).id; // v2
+  _orderTempFileId_ = tempFileId;
+  return SpreadsheetApp.openById(tempFileId);
 }
 
 /** generatePlan() 끝에서 호출 — 발주서 xlsx 변환 과정에서 생긴 임시 사본을 정리한다. */

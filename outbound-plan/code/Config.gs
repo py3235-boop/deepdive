@@ -13,20 +13,27 @@ const CONFIG = {
   // 공휴일 / 기준정보 / 제품 중량 파일 등이 들어있는 구글 드라이브(공유문서함) 폴더 ID.
   // 스크립트 속성에 REFERENCE_FOLDER_ID로 등록. 비어있으면 생산capa 검증/공휴일 시프트를 스킵한다.
   REFERENCE_FOLDER_ID: PropertiesService.getScriptProperties().getProperty('REFERENCE_FOLDER_ID') || null,
+  // 구글챗 스페이스에 등록한 수신 웹훅 URL. 스크립트 속성에 CHAT_WEBHOOK_URL로 등록.
+  // 비어있으면 알림을 그냥 스킵한다(에러 아님) — 필수 기능이 아니라 있으면 켜지는 부가 기능.
+  CHAT_WEBHOOK_URL: PropertiesService.getScriptProperties().getProperty('CHAT_WEBHOOK_URL') || null,
   PLAN_SHEET_NAME: '출고계획', // 출고계획 결과를 쓸 탭 이름 — 이 이름의 탭(없으면 첫 탭)에 그대로 덮어씀
   // 하루 상한은 항상 업체별 독립으로 정확히 트럭 1대 — 물량이 많으면 트럭을 더 싣는 게 아니라
   // 그 업체의 배송일 자체를 늘린다.
   TRUCK_KG: 5000,
-  LIGHT_DAY_TRUCK_THRESHOLD: 2, // 여러 업체를 합쳐 이 대수 이하인 날을 "가벼운 날"로 선호(하드캡 아님, 여유일 고를 때만 씀)
+  // 생산capa 등의 이유로 어떤 날짜의 배정량이 이 값보다 작으면, 배정이 다 끝난 뒤 그 품목의 다음
+  // (더 나중) 배정일로 합친다(트럭 상한/생산capa를 넘기지 않을 때만) — 트럭 1대(TRUCK_KG)의 절반.
+  MIN_SHIPMENT_KG: 2500,
+  LIGHT_DAY_TRUCK_THRESHOLD: 2, // 여러 업체를 합쳐 이 대수 미만인 날을 "가벼운 날"로 선호(하드캡 아님, 여유일 고를 때만 씀) — 이미 이 대수에 도달했으면 트럭 하나 더 실을 여유가 없다고 봄
   DEEP_DIVE_MARKER: '딥다이브', // 발주서 시트 1행에서 이 텍스트를 찾아 그 열부터 표가 시작한다고 봄
 };
 
-// 실제 업체명 → 배송 타입. 발주서 시트명의 "고객사 X" 표기에서 뽑아낸 "X사"와 정확히 일치해야 한다.
-// A/B사는 트럭버킷(요일별 기준일 + 트럭 1대 상한 + 라운드로빈), C사는 금요일 단순 균등분배.
+// 실제 업체명 → 배송 타입. 발주서 시트명의 "고객사 X" 표기에서 뽑아낸 "고객사X"와 정확히 일치해야
+// 한다(다른 파트와 표기를 맞추기 위해 "X사"가 아니라 "고객사X" 형태를 쓴다).
+// 세 업체 모두 트럭버킷(요일별 기준일 + 트럭 1대 상한 + 라운드로빈) — 요일만 다르다.
 const VENDOR_TYPE_MAP = {
-  'A사': 'monday_bucket',
-  'B사': 'wednesday_bucket',
-  'C사': 'friday_even',
+  '고객사A': 'monday_bucket',
+  '고객사B': 'wednesday_bucket',
+  '고객사C': 'friday_bucket',
 };
 
 // 트럭버킷 타입 → 기준 요일(0=일 ... 6=토). TruckBucket.gs가 이 표로 요일을 찾는다.
