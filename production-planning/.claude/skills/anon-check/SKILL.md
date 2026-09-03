@@ -1,6 +1,6 @@
 ---
 name: anon-check
-description: 익명화 전수 검사. split/·data/·문서·에이전트 파일에서 실명·회사명·실제 공정명·실제 품목코드·Drive/시트/스크립트 URL·웹훅·텔레그램 토큰이 남아 있는지 스크립트로 검사한다. "익명화 검사", "실명 남았는지 확인", 검증(#7)·발표 준비(#10)·public 전환 직전, 커밋 전에 사용.
+description: 익명화 전수 검사. split/·data/·문서·에이전트 파일에서 실명·회사명·실제 공정명·실제 품목코드·Drive/시트/스크립트 URL·웹훅·텔레그램 토큰이 남아 있는지 스크립트로 검사한다. "익명화 검사", "실명 남았는지 확인", 검증(#7)·제출 준비(#10)·public 전환 직전, 커밋 전에 사용.
 ---
 
 # 익명화 전수 검사
@@ -12,7 +12,7 @@ description: 익명화 전수 검사. split/·data/·문서·에이전트 파일
 python .claude/skills/anon-check/anon_check.py
 ```
 - 기본 대상: `split/`, `data/`, `scripts/`, `docs/`, `.claude/agents/`, 루트의 파일
-- 특정 파일/폴더만: `python .claude/skills/anon-check/anon_check.py split/Code.gs 발표자료.md`
+- 특정 파일/폴더만: `python .claude/skills/anon-check/anon_check.py split/Code.gs CLAUDE.md`
 - 종료 코드 0 = 통과, 2 = 위반 있음(stderr에 파일·줄·내용)
 
 ## 검사 항목
