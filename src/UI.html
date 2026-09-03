@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --line: #e3e6ea;
+    --text: #1f2328;
+    --dim: #6b7280;
+    --accent: #1a73e8;
+    --ok: #137333;
+    --warn: #b06000;
+    --warnbg: #fff8e1;
+    --err: #c5221f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px;
+    font: 14px/1.6 -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 18px; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px; margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 14px; margin: 0 0 12px; color: var(--dim);
+    text-transform: none; letter-spacing: .02em;
+  }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .stat { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .stat .n { font-size: 20px; font-weight: 600; }
+  .stat .l { font-size: 12px; color: var(--dim); }
+  .stat.warn { background: var(--warnbg); border-color: #f0d48a; }
+
+  button {
+    font: inherit; font-weight: 500; cursor: pointer;
+    border: 1px solid var(--line); background: #fff; color: var(--text);
+    border-radius: 8px; padding: 9px 14px;
+  }
+  button:hover { background: #f1f3f4; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+  select, input[type=file] {
+    font: inherit; padding: 8px; border: 1px solid var(--line);
+    border-radius: 8px; background: #fff;
+  }
+
+  pre {
+    background: #f6f8fa; border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px; overflow-x: auto; font-size: 12.5px; line-height: 1.55;
+    white-space: pre-wrap; word-break: break-word; margin: 12px 0 0;
+    max-height: 460px; overflow-y: auto;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  .scroll { overflow-x: auto; }
+
+  a { color: var(--accent); }
+  .msg { margin-top: 10px; font-size: 13px; }
+  .msg.ok { color: var(--ok); }
+  .msg.err { color: var(--err); }
+  .msg.warn { color: var(--warn); }
+  .empty { color: var(--dim); font-size: 13px; }
+  .spin { display: inline-block; animation: r 1s linear infinite; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  .tagline { font-size: 12px; color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>발주서 자동화</h1>
+  <div class="sub">고객사 발주서를 형식에 맞게 읽어 딥다이브 품목코드로 변환하고 월별 발주서에 기록합니다.</div>
+
+  <!-- 현재 상태 -->
+  <div class="card">
+    <h2>현재 상태</h2>
+    <div id="상태">불러오는 중…</div>
+  </div>
+
+  <!-- 실행 -->
+  <div class="card">
+    <h2>실행</h2>
+    <div class="row">
+      <button class="primary" id="btn전체" onclick="전체실행()">▶ 전체 실행 (드라이브 + 메일)</button>
+      <button onclick="상태읽기()">상태 새로고침</button>
+      <span class="tagline" id="트리거문구"></span>
+    </div>
+    <div id="실행결과"></div>
+  </div>
+
+  <!-- 수동 업로드 -->
+  <div class="card">
+    <h2>수동 업로드</h2>
+    <div class="row">
+      <select id="업로드고객사">
+        <option value="">자동 판별</option>
+      </select>
+      <input type="file" id="업로드파일">
+      <button id="btn업로드" onclick="업로드()">올려서 처리</button>
+    </div>
+    <div class="tagline" style="margin-top:8px">
+      docx · xlsx · pdf · png · jpg · csv 를 지원합니다. 한글(.hwp)은 지원하지 않습니다.
+    </div>
+    <div id="업로드결과"></div>
+  </div>
+
+  <!-- 미분류 -->
+  <div class="card">
+    <h2>미분류 — 고객사를 지정해주세요</h2>
+    <div id="미분류"></div>
+  </div>
+
+  <!-- 미매핑 -->
+  <div class="card">
+    <h2>미매핑 · 보류 기록</h2>
+    <div class="row">
+      <button onclick="미매핑읽기()">불러오기</button>
+    </div>
+    <div id="미매핑"></div>
+  </div>
+
+</div>
+
+<script>
+var 고객사목록 = [];
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function 바쁨(id, 켬, 글) {
+  var b = document.getElementById(id);
+  b.disabled = 켬;
+  if (켬) { b.dataset.old = b.textContent; b.innerHTML = '<span class="spin">◐</span> ' + (글 || '처리 중…'); }
+  else if (b.dataset.old) { b.textContent = b.dataset.old; }
+}
+
+// ── 상태 ──
+function 상태읽기() {
+  document.getElementById('상태').textContent = '불러오는 중…';
+  google.script.run.withSuccessHandler(상태그리기)
+    .withFailureHandler(function (e) {
+      document.getElementById('상태').innerHTML =
+        '<div class="msg err">상태를 읽지 못했습니다: ' + esc(e.message) + '</div>';
+    })
+    .웹앱_상태();
+}
+
+function 상태그리기(s) {
+  if (s.오류) {
+    document.getElementById('상태').innerHTML =
+      '<div class="msg err">' + esc(s.오류) + '</div>';
+    return;
+  }
+
+  고객사목록 = s.고객사 || [];
+  var sel = document.getElementById('업로드고객사');
+  sel.innerHTML = '<option value="">자동 판별</option>' +
+    고객사목록.map(function (c) { return '<option>' + esc(c) + '</option>'; }).join('');
+
+  var h = '<div class="grid">';
+  (s.규칙 || []).forEach(function (r) {
+    h += '<div class="stat"><div class="n">' + r.규칙수 + '</div>' +
+         '<div class="l">' + esc(r.고객사) + ' 변환규칙 · ' + esc(r.레이아웃) + '</div></div>';
+  });
+  h += '<div class="stat"><div class="n">' + (s.식별규칙수 || 0) + '</div><div class="l">식별 규칙</div></div>';
+  h += '<div class="stat' + (s.미분류수 ? ' warn' : '') + '"><div class="n">' + (s.미분류수 || 0) +
+       '</div><div class="l">미분류 대기</div></div>';
+  h += '<div class="stat' + (s.미매핑수 ? ' warn' : '') + '"><div class="n">' + (s.미매핑수 || 0) +
+       '</div><div class="l">미매핑 기록</div></div>';
+  h += '<div class="stat"><div class="n">' + (s.처리로그수 || 0) + '</div><div class="l">처리 이력</div></div>';
+  h += '</div>';
+
+  if (s.산출물 && s.산출물.length) {
+    h += '<div style="margin-top:12px"><b>월별 발주서</b><br>';
+    h += s.산출물.map(function (o) {
+      return '<a href="' + esc(o.URL) + '" target="_blank">' + esc(o.월) + ' 발주서</a>';
+    }).join(' · ');
+    h += '</div>';
+  } else {
+    h += '<div class="empty" style="margin-top:12px">아직 만들어진 월별 발주서가 없습니다.</div>';
+  }
+
+  h += '<div class="tagline" style="margin-top:10px">메일 검색식: <code>' + esc(s.검색식 || '') + '</code></div>';
+  if (s.관리시트URL) {
+    h += '<div class="tagline"><a href="' + esc(s.관리시트URL) + '" target="_blank">관리 시트 열기</a>' +
+         ' — 변환규칙·식별규칙·로그를 여기서 관리합니다</div>';
+  }
+
+  if (s.경고 && s.경고.length) {
+    h += '<div class="msg warn" style="margin-top:10px">확인 필요 ' + s.경고.length + '건<br>' +
+         s.경고.map(esc).join('<br>') + '</div>';
+  }
+
+  document.getElementById('상태').innerHTML = h;
+  document.getElementById('트리거문구').textContent = s.트리거 || '';
+
+  미분류읽기();
+}
+
+// ── 전체 실행 ──
+function 전체실행() {
+  바쁨('btn전체', true, '실행 중… (수십 초 걸릴 수 있습니다)');
+  document.getElementById('실행결과').innerHTML = '';
+  google.script.run
+    .withSuccessHandler(function (r) {
+      바쁨('btn전체', false);
+      var cls = r.문제 ? 'warn' : 'ok';
+      document.getElementById('실행결과').innerHTML =
+        '<div class="msg ' + cls + '">' + (r.문제 ? '확인 필요 ' + r.문제 + '건' : '전부 통과') + '</div>' +
+        '<pre>' + esc(r.요약) + '\n\n──────── 상세 ────────\n' + esc(r.상세) + '</pre>';
+      상태읽기();
+    })
+    .withFailureHandler(function (e) {
+      바쁨('btn전체', false);
+      document.getElementById('실행결과').innerHTML =
+        '<div class="msg err">실행 실패: ' + esc(e.message) + '</div>';
+    })
+    .웹앱_전체실행();
+}
+
+// ── 업로드 ──
+function 업로드() {
+  var f = document.getElementById('업로드파일').files[0];
+  var out = document.getElementById('업로드결과');
+  if (!f) { out.innerHTML = '<div class="msg err">파일을 골라주세요.</div>'; return; }
+
+  바쁨('btn업로드', true, '업로드 중…');
+  out.innerHTML = '';
+
+  var reader = new FileReader();
+  reader.onload = function () {
+    var base64 = reader.result.split(',')[1];
+    google.script.run
+      .withSuccessHandler(function (r) {
+        바쁨('btn업로드', false);
+        out.innerHTML = '<div class="msg ' + (r.성공 ? 'ok' : 'err') + '">' + esc(r.메시지) + '</div>' +
+          (r.검산 ? '<div class="tagline">' + esc(r.검산) + '</div>' : '') +
+          (r.판정근거 ? '<div class="tagline">판정: ' + esc(r.판정근거) + '</div>' : '');
+        document.getElementById('업로드파일').value = '';
+        상태읽기();
+      })
+      .withFailureHandler(function (e) {
+        바쁨('btn업로드', false);
+        out.innerHTML = '<div class="msg err">' + esc(e.message) + '</div>';
+      })
+      .웹앱_업로드(base64, f.name, document.getElementById('업로드고객사').value);
+  };
+  reader.onerror = function () {
+    바쁨('btn업로드', false);
+    out.innerHTML = '<div class="msg err">파일을 읽지 못했습니다.</div>';
+  };
+  reader.readAsDataURL(f);
+}
+
+// ── 미분류 ──
+function 미분류읽기() {
+  google.script.run.withSuccessHandler(function (목록) {
+    var box = document.getElementById('미분류');
+    if (!목록.length) {
+      box.innerHTML = '<div class="empty">미분류 대기 중인 파일이 없습니다.</div>';
+      return;
+    }
+    var h = '<div class="scroll"><table><tr><th>파일</th><th>고객사 지정</th></tr>';
+    목록.forEach(function (f, i) {
+      h += '<tr><td><a href="' + esc(f.URL) + '" target="_blank">' + esc(f.이름) + '</a></td><td>';
+      h += '<div class="row"><select id="mc' + i + '">' +
+        고객사목록.map(function (c) { return '<option>' + esc(c) + '</option>'; }).join('') +
+        '</select>';
+      h += '<button id="mb' + i + '" onclick="미분류지정(\'' + f.ID + '\', ' + i + ')">지정</button></div>';
+      h += '<div id="mr' + i + '"></div></td></tr>';
+    });
+    h += '</table></div>';
+    box.innerHTML = h;
+  }).웹앱_미분류목록();
+}
+
+function 미분류지정(파일ID, i) {
+  var 고객사 = document.getElementById('mc' + i).value;
+  바쁨('mb' + i, true, '처리 중');
+  google.script.run
+    .withSuccessHandler(function (r) {
+      바쁨('mb' + i, false);
+      document.getElementById('mr' + i).innerHTML =
+        '<div class="msg ' + (r.성공 ? 'ok' : 'err') + '">' + esc(r.메시지) + '</div>';
+      if (r.성공) 상태읽기();
+    })
+    .withFailureHandler(function (e) {
+      바쁨('mb' + i, false);
+      document.getElementById('mr' + i).innerHTML =
+        '<div class="msg err">' + esc(e.message) + '</div>';
+    })
+    .웹앱_미분류지정(파일ID, 고객사);
+}
+
+// ── 미매핑 ──
+function 미매핑읽기() {
+  var box = document.getElementById('미매핑');
+  box.innerHTML = '<div class="empty">불러오는 중…</div>';
+  google.script.run.withSuccessHandler(function (목록) {
+    if (!목록.length) {
+      box.innerHTML = '<div class="empty">미매핑 기록이 없습니다.</div>';
+      return;
+    }
+    var h = '<div class="scroll"><table><tr><th>일시</th><th>채널</th><th>원본</th><th>고객사</th><th>사유</th></tr>';
+    목록.forEach(function (r) {
+      h += '<tr><td>' + esc(r.일시) + '</td><td>' + esc(r.채널) + '</td><td>' + esc(r.원본) +
+        '</td><td>' + esc(r.고객사) + '</td><td>' + esc(r.사유) + '</td></tr>';
+    });
+    h += '</table></div>';
+    box.innerHTML = h;
+  }).웹앱_미매핑목록(50);
+}
+
+상태읽기();
+</script>
+</body>
+</html>

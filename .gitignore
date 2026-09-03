@@ -1,0 +1,12 @@
+# clasp 프로젝트 설정 — 스크립트 ID·상위 시트 ID가 들어 있어 공개하지 않는다
+.clasp.json
+
+# 발주서 원본 데이터는 드라이브에만 둔다
+발주서 데이터/
+고객사 발주서 데이터/
+필수파일/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
