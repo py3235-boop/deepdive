@@ -249,3 +249,122 @@ function 식별_테스트_메뉴() {
   const ui = SpreadsheetApp.getUi();
   ui.alert('식별 테스트', 결과.slice(0, 4000), ui.ButtonSet.OK);
 }
+
+// ─────────────────────────────────────────────────────────────
+// 미분류 처리
+// ─────────────────────────────────────────────────────────────
+
+/** 미분류 폴더에 남아 있는(완료 표시 안 된) 파일 목록 */
+function 미분류_목록() {
+  const ID = 설정전체()['폴더.미분류'];
+  if (!ID) return [];
+
+  const 목록 = [];
+  try {
+    const it = DriveApp.getFolderById(ID).getFiles();
+    while (it.hasNext()) {
+      const f = it.next();
+      if (완료표시됨(f.getName())) continue;
+      목록.push({ ID: f.getId(), 이름: f.getName(), URL: f.getUrl() });
+    }
+  } catch (e) {
+    Logger.log('미분류 폴더를 열지 못했습니다: ' + e);
+  }
+  return 목록;
+}
+
+/**
+ * 미분류 파일에 고객사를 지정해 처리한다.
+ * 자동 판별이 실패한 건을 사람이 구제하는 유일한 경로다.
+ */
+function 미분류_지정(파일ID, 고객사) {
+  if (고객사목록.indexOf(고객사) < 0) {
+    return '알 수 없는 고객사: ' + 고객사 + ' (' + 고객사목록.join(', ') + ' 중 하나)';
+  }
+
+  const 파일 = DriveApp.getFileById(파일ID);
+  const 이름 = 파일.getName();
+
+  // 고객사 폴더로 이동
+  고객사폴더(고객사).addFile(파일);
+  try {
+    DriveApp.getFolderById(설정값('폴더.미분류')).removeFile(파일);
+  } catch (e) {
+    Logger.log('미분류 폴더에서 떼지 못했습니다(무시): ' + e);
+  }
+
+  const 규칙 = 변환규칙_로드();
+  const 양식 = 양식_로드();
+  const 추출결과 = 추출({ blob: 파일.getBlob(), 파일명: 이름, 원본ID: 파일ID });
+
+  if (!추출결과.성공) {
+    return 이름 + ' → 추출 실패: ' + (추출결과.메타.실패사유 || '?');
+  }
+
+  const R = 처리(고객사, 추출결과, 규칙, 양식);
+  const 기록요약 = 기록(R, {
+    채널: '수동 지정',
+    원본이름: 이름,
+    식별키: 파일ID,
+    출처URL: 파일.getUrl(),
+  });
+
+  if (기록요약.보류) {
+    return 이름 + ' → 보류: ' + 기록요약.메모.join(' / ');
+  }
+
+  완료표시(파일);
+  return 이름 + ' → ' + 고객사 + ' 로 지정, 기록 ' + 기록요약.기록수 + '행' +
+    (기록요약.대체수 ? ' (기존 ' + 기록요약.대체수 + '행 대체)' : '');
+}
+
+/**
+ * 시트 메뉴용. 미분류 목록을 보여주고, 원하면 그 자리에서 고객사를 지정한다.
+ * 입력 형식: `번호 고객사`  (예: `1 고객사B`)
+ */
+function 미분류_목록_메뉴() {
+  const ui = SpreadsheetApp.getUi();
+  const 목록 = 미분류_목록();
+
+  if (!목록.length) {
+    ui.alert('미분류', '미분류 대기 중인 파일이 없습니다.', ui.ButtonSet.OK);
+    return;
+  }
+
+  const 줄 = 목록.map(function (f, i) { return (i + 1) + '. ' + f.이름; });
+  const 답 = ui.prompt(
+    '미분류 ' + 목록.length + '건',
+    줄.join('\n') + '\n\n'
+    + '지정할 항목을 "번호 고객사" 로 입력하세요 (예: 1 고객사B)\n'
+    + '고객사: ' + 고객사목록.join(' / ') + '\n'
+    + '취소를 누르면 목록만 확인합니다.',
+    ui.ButtonSet.OK_CANCEL
+  );
+
+  if (답.getSelectedButton() !== ui.Button.OK) return;
+
+  const 입력 = String(답.getResponseText() || '').trim();
+  if (!입력) return;
+
+  const 조각 = 입력.split(/\s+/);
+  const 번호 = parseInt(조각[0], 10);
+  const 고객사 = 조각.slice(1).join('');
+
+  if (!번호 || 번호 < 1 || 번호 > 목록.length) {
+    ui.alert('미분류', '번호가 1~' + 목록.length + ' 범위를 벗어났습니다: ' + 조각[0], ui.ButtonSet.OK);
+    return;
+  }
+  if (!고객사) {
+    ui.alert('미분류', '고객사를 함께 입력해주세요. 예: ' + 번호 + ' ' + 고객사목록[0], ui.ButtonSet.OK);
+    return;
+  }
+
+  let 결과;
+  try {
+    결과 = 미분류_지정(목록[번호 - 1].ID, 고객사);
+  } catch (e) {
+    결과 = '실패: ' + e;
+  }
+  Logger.log(결과);
+  ui.alert('미분류 지정 결과', 결과, ui.ButtonSet.OK);
+}

@@ -24,6 +24,7 @@ function onOpen() {
         .addItem('6. 메일 수집', '메일수집_테스트_메뉴')
     )
     .addSeparator()
+    .addItem('미분류 목록 보기', '미분류_목록_메뉴')
     .addItem('산출물 초기화', '산출물_초기화_메뉴')
     .addToUi();
 }

@@ -18,10 +18,6 @@
     "https://www.googleapis.com/auth/script.scriptapp",
     "https://www.googleapis.com/auth/userinfo.email"
   ],
-  "webapp": {
-    "executeAs": "USER_DEPLOYING",
-    "access": "ANYONE_ANONYMOUS"
-  },
   "exceptionLogging": "STACKDRIVER",
   "runtimeVersion": "V8"
 }
