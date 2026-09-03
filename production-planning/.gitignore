@@ -1,0 +1,17 @@
+# clasp 바인딩 정보 (scriptId·parentId) — 저장소 public 전환 대비 커밋 금지
+.clasp.json
+.clasprc.json
+
+# 비밀값
+*.secret*
+
+# 로컬 산출물
+node_modules/
+~$*.xlsx
+*.tmp
+
+# 대회 제출·안내 문서 — 대표자 실명·공장 위치 등 식별 정보가 있어 공개 저장소에 올리지 않는다
+*.pdf
+
+# 검토용 임시 덤프 (오프라인 하네스 산출물 — 저장소에 올리지 않는다)
+검토자료/

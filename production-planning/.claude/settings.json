@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/skills/anon-check/anon_check.py\" --hook",
+            "timeout": 20,
+            "statusMessage": "익명화 검사 중"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(clasp status*)",
+      "Bash(clasp push*)",
+      "Bash(clasp open*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push origin main*)",
+      "Bash(git init*)",
+      "Bash(python *)",
+      "Bash(ls*)",
+      "Bash(dir*)"
+    ],
+    "deny": [
+      "Bash(clasp login*)",
+      "Bash(clasp pull*)",
+      "Bash(clasp push --force*)",
+      "Bash(git push --force*)",
+      "Bash(git reset --hard*)"
+    ]
+  }
+}
