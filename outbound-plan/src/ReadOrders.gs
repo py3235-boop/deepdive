@@ -1,0 +1,116 @@
+/**
+ * 발주서를 읽어서 {업체, 품목코드, 규격, 수량, 납기일} 객체 배열로 반환한다 — 대회구현가이드 §2 방식.
+ *
+ * CONFIG.ORDER_FOLDER_ID가 있으면 그 드라이브 폴더에서 'YYYY-MM 발주서' 파일을 찾아 읽고,
+ * 없으면(테스트 모드) 이 스프레드시트 자체 안의 "고객사 A/B/C" 탭을 발주서로 간주한다.
+ *
+ * 한 발주서 파일 안에 업체별로 시트가 나뉘어 있고, 시트명이 '고객사 X' 패턴에 매치되면 그 알파벳을
+ * "X사"로 매핑해서 업체를 판별한다. 각 시트는 1행에서 CONFIG.DEEP_DIVE_MARKER('딥다이브') 텍스트를
+ * 찾아 그 열부터 표가 시작한다고 보고, 2행 헤더 텍스트로 품목코드/규격/중량/납기일 컬럼을 인식한다.
+ */
+function loadOrderStatus() {
+  const ss = _resolveOrderSpreadsheet_();
+  const orders = [];
+
+  ss.getSheets().forEach(sheet => {
+    const vendor = _detectVendorFromSheetName_(sheet.getName());
+    if (!vendor) return; // '고객사 X' 패턴이 아니면 발주서 탭이 아니라고 보고 스킵
+
+    const sheetOrders = _readOrderSheet_(sheet, vendor);
+    orders.push.apply(orders, sheetOrders);
+  });
+
+  return orders;
+}
+
+function _detectVendorFromSheetName_(sheetName) {
+  const m = sheetName.match(/고객사\s*([A-Za-z])/);
+  return m ? m[1].toUpperCase() + '사' : null;
+}
+
+var _orderTempFileId_ = null;
+
+function _resolveOrderSpreadsheet_() {
+  if (!CONFIG.ORDER_FOLDER_ID) {
+    // 테스트 모드: 이 스프레드시트 자체 안의 "고객사 A/B/C" 탭을 발주서로 취급
+    return SpreadsheetApp.getActiveSpreadsheet();
+  }
+
+  const folder = DriveApp.getFolderById(CONFIG.ORDER_FOLDER_ID);
+  const it = folder.getFiles();
+  let best = null;
+  while (it.hasNext()) {
+    const f = it.next();
+    if (!/^\d{4}-\d{2}\s*발주서/.test(f.getName())) continue;
+    if (!best || f.getLastUpdated() > best.getLastUpdated()) best = f;
+  }
+  if (!best) {
+    throw new Error("ORDER_FOLDER_ID 폴더에서 'YYYY-MM 발주서' 파일을 못 찾았습니다.");
+  }
+
+  if (best.getMimeType() === MimeType.GOOGLE_SHEETS) {
+    return SpreadsheetApp.open(best);
+  }
+
+  // xlsx 등은 구글시트 변환 사본을 임시로 만들어서 읽는다(고급 Drive 서비스 필요).
+  const converted = Drive.Files.insert(
+    { title: '__tmp_' + best.getName(), mimeType: MimeType.GOOGLE_SHEETS },
+    best.getBlob(),
+    { convert: true }
+  );
+  _orderTempFileId_ = converted.id;
+  return SpreadsheetApp.openById(converted.id);
+}
+
+/** generatePlan() 끝에서 호출 — 발주서 xlsx 변환 과정에서 생긴 임시 사본을 정리한다. */
+function cleanupOrderFile_() {
+  if (_orderTempFileId_) {
+    try {
+      DriveApp.getFileById(_orderTempFileId_).setTrashed(true);
+    } catch (e) {
+      // 이미 지워졌거나 접근 불가하면 무시
+    }
+    _orderTempFileId_ = null;
+  }
+}
+
+function _readOrderSheet_(sheet, vendor) {
+  const values = sheet.getDataRange().getValues();
+  if (values.length < 3) return [];
+
+  const markerRow = values[0];
+  const startCol = markerRow.findIndex(v => String(v).trim() === CONFIG.DEEP_DIVE_MARKER);
+  if (startCol === -1) return []; // 마커 없으면 발주서 표가 아니라고 보고 스킵
+
+  const headerRow = values[1].slice(startCol);
+  const col = {
+    code: findColumnIndex_(headerRow, ORDER_COLUMN_KEYWORDS.code),
+    spec: findColumnIndex_(headerRow, ORDER_COLUMN_KEYWORDS.spec),
+    weight: findColumnIndex_(headerRow, ORDER_COLUMN_KEYWORDS.weight),
+    date: findColumnIndex_(headerRow, ORDER_COLUMN_KEYWORDS.date),
+  };
+  if (col.code === -1 || col.weight === -1) return []; // 필수 컬럼(품목코드/중량) 없으면 스킵
+
+  const orders = [];
+  values.slice(2).forEach(row => {
+    const cells = row.slice(startCol);
+    const codeCell = cells[col.code];
+    if (!codeCell) return;
+
+    const qty = Number(cells[col.weight]) || 0;
+    if (!qty) return;
+
+    const dateCell = col.date !== -1 ? cells[col.date] : null;
+    const dueDate = dateCell ? (dateCell instanceof Date ? dateCell : new Date(dateCell)) : null;
+
+    orders.push({
+      vendor: vendor,
+      code: String(codeCell).trim(),
+      spec: col.spec !== -1 && cells[col.spec] ? String(cells[col.spec]).trim() : '',
+      qty: qty,
+      dueDate: dueDate,
+    });
+  });
+
+  return orders;
+}
