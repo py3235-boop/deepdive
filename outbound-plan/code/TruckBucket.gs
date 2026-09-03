@@ -36,7 +36,7 @@ function buildTruckBucketPlan_(items, year, month, weekday, holidaySet, capaInfo
     unitWeight: lookupUnitWeight_(weights, it.code, it.spec),
     dateMap: {},
   }));
-  // 단위중량 큰 품목부터(같으면 물량 큰 품목부터) 처리 
+  // 단위중량 큰 품목부터(같으면 물량 큰 품목부터) 처리
   itemState.sort((a, b) => (b.unitWeight || 0) - (a.unitWeight || 0) || b.remaining - a.remaining);
 
   const totalWeight = itemState.reduce((s, it) => s + it.remaining, 0);
