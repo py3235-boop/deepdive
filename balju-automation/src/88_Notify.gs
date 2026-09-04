@@ -5,18 +5,63 @@
  * 확인이 필요한 건(미매핑·검산 실패·보류)은 다른 표시로 보낸다.
  *
  * ⚠️ 웹훅 URL 은 그 자체가 열쇠다 (가진 사람은 누구나 그 채팅방에 글을 쓸 수 있다).
- * **코드에 넣지 않고 `설정` 탭 `알림.챗웹훅` 에서 읽는다.** 그래야 GitHub 에도 올라가지 않는다.
+ *
+ * 그래서 **스크립트 속성(Script Properties)** 에 둔다. 코드에도 시트에도 남지 않는다.
+ * 시트를 `링크가 있는 모든 사용자` 로 공개해도 스크립트 속성은 보이지 않는다
+ * (스크립트 편집 권한이 있어야 볼 수 있다).
+ *
+ * 예전에는 `설정` 탭에 뒀다. 거기 남아 있으면 읽어서 스크립트 속성으로 옮기고 시트에서 지운다.
  *
  * 설정 키
- *   알림.챗웹훅   Google Chat 수신 웹훅 URL. 비어 있으면 알림을 보내지 않는다
- *   알림.끔       `true` 로 두면 URL 이 있어도 보내지 않는다 (시연 중 조용히 하고 싶을 때)
+ *   알림.끔   `true` 로 두면 URL 이 있어도 보내지 않는다 (시연 중 조용히 하고 싶을 때)
  */
 
-/** 설정에서 웹훅 URL 을 읽는다. 없거나 꺼져 있으면 빈 문자열 */
+/** 스크립트 속성의 웹훅 키 */
+const _웹훅속성키 = '알림.챗웹훅';
+
+/**
+ * 웹훅 URL 을 읽는다. 없거나 꺼져 있으면 빈 문자열.
+ *
+ * `설정` 탭에 예전 값이 남아 있으면 **스크립트 속성으로 옮기고 시트에서 지운다.**
+ * 시트를 공개해도 URL 이 새지 않게 하기 위해서다.
+ */
 function _챗웹훅URL() {
-  const 설정 = 설정전체();
-  if (String(설정['알림.끔'] || '').toLowerCase() === 'true') return '';
-  return String(설정['알림.챗웹훅'] || '').trim();
+  if (String(설정전체()['알림.끔'] || '').toLowerCase() === 'true') return '';
+
+  const 속성 = PropertiesService.getScriptProperties();
+  const 저장된 = String(속성.getProperty(_웹훅속성키) || '').trim();
+  if (저장된) return 저장된;
+
+  // 예전 방식(설정 탭)에서 옮겨온다
+  const 시트값 = String(설정전체()[_웹훅속성키] || '').trim();
+  if (시트값) {
+    속성.setProperty(_웹훅속성키, 시트값);
+    try {
+      설정값쓰기(_웹훅속성키, '', '스크립트 속성으로 옮겼습니다 (시트를 공개해도 새지 않게)');
+      Logger.log('웹훅 URL 을 설정 탭에서 스크립트 속성으로 옮겼습니다');
+    } catch (e) {
+      Logger.log('설정 탭에서 웹훅을 지우지 못했습니다(무시): ' + e);
+    }
+    return 시트값;
+  }
+
+  return '';
+}
+
+/** 웹훅 URL 을 스크립트 속성에 저장한다 (시트에는 쓰지 않는다) */
+function _챗웹훅저장(URL) {
+  const 속성 = PropertiesService.getScriptProperties();
+  if (URL) 속성.setProperty(_웹훅속성키, URL);
+  else 속성.deleteProperty(_웹훅속성키);
+
+  // 예전 값이 시트에 남아 있으면 지운다
+  try {
+    if (String(설정전체()[_웹훅속성키] || '').trim()) {
+      설정값쓰기(_웹훅속성키, '', '스크립트 속성에 있습니다 (시트에는 두지 않습니다)');
+    }
+  } catch (e) {
+    Logger.log('설정 탭 정리 실패(무시): ' + e);
+  }
 }
 
 /**
@@ -167,7 +212,8 @@ function _웹훅안내문() {
  */
 function 알림_웹훅설정_메뉴() {
   const ui = SpreadsheetApp.getUi();
-  const 현재 = String(설정전체()['알림.챗웹훅'] || '').trim();
+  const 현재 = String(PropertiesService.getScriptProperties()
+    .getProperty(_웹훅속성키) || 설정전체()[_웹훅속성키] || '').trim();
 
   const 안내 = [
     (현재 ? '지금 설정된 URL: ' + 현재.slice(0, 60) + '…' : '아직 설정되지 않았습니다.'),
@@ -184,7 +230,7 @@ function 알림_웹훅설정_메뉴() {
   const URL = String(답.getResponseText() || '').trim();
 
   if (!URL) {
-    설정값쓰기('알림.챗웹훅', '', 'Google Chat 수신 웹훅 URL (비우면 알림 끔)');
+    _챗웹훅저장('');
     ui.alert('알림 설정', '웹훅을 지웠습니다. 알림을 보내지 않습니다.', ui.ButtonSet.OK);
     return;
   }
@@ -201,7 +247,8 @@ function 알림_웹훅설정_메뉴() {
     if (계속 !== ui.Button.YES) return;
   }
 
-  설정값쓰기('알림.챗웹훅', URL, 'Google Chat 수신 웹훅 URL');
+  // 시트가 아니라 스크립트 속성에 저장한다 — 시트를 공개해도 URL 이 새지 않게
+  _챗웹훅저장(URL);
   설정값쓰기('알림.끔', '', 'true 로 두면 알림을 보내지 않는다');
 
   const 보냄 = 챗알림(
@@ -221,7 +268,7 @@ function 알림_웹훅설정_메뉴() {
 /** 시트 메뉴용. 웹훅이 살아 있는지 시험 메시지를 보낸다. */
 function 알림_테스트_메뉴() {
   const ui = SpreadsheetApp.getUi();
-  const URL = String(설정전체()['알림.챗웹훅'] || '').trim();
+  const URL = _챗웹훅URL();
 
   if (!URL) {
     ui.alert('알림 설정 없음',
@@ -229,12 +276,6 @@ function 알림_테스트_메뉴() {
        '메뉴의 `알림 설정 (Google Chat 웹훅)` 을 먼저 실행해주세요.',
        '',
        _웹훅안내문()].join('\n'),
-      ui.ButtonSet.OK);
-    return;
-  }
-
-  if (String(설정전체()['알림.끔'] || '').toLowerCase() === 'true') {
-    ui.alert('알림 꺼짐', '설정 탭의 `알림.끔` 이 true 입니다. 지우거나 false 로 바꾸세요.',
       ui.ButtonSet.OK);
     return;
   }
