@@ -69,18 +69,22 @@ function _normCode_(v) {
  * 품목코드의 "그 날짜까지 누적 생산 가능량" 계산 함수를 만든다.
  *   cum = 기초재고 + (계획월 1일부터 그 날짜까지 MachineSchedule.gs가 시뮬레이션한 실제 생산량 합) - 적정재고
  *   0 밑으로는 안 내려감.
- * producedByDate가 없는 품목(=시뮬레이션에서 호기를 하나도 못 받음 or capa 정보 자체가 없음)은
- * 검증 자체를 스킵(무제한 취급)한다.
+ * 기초재고/적정재고 정보 자체가 없는 품목(기준정보에 아예 없음)만 검증을 스킵(무제한 취급)한다.
+ * producedByDate가 없는 품목(=설비 경쟁에서 밀려 이번 달 호기를 하나도 못 받음)은 무제한이 아니라
+ * **생산량 0으로 취급**한다 — "생산을 못 받았으니 검증 안 함"이 아니라 "생산을 못 받았으니 기초재고
+ * 넘는 만큼만(대개 0)"이 맞는 방향이다. 이걸 반대로 하면 설비를 하나도 못 받은, 오히려 가장 위험한
+ * 품목이 검증에서 완전히 빠지는 결과가 된다.
  * ⚠ AS_OF_DATE는 쓰지 않는다 — 실적 반영이 없는 순수 계획 단계라서 계획월 1일부터 근무일마다 그대로
  *   쌓인다고 본다(실적 반영 단계에서만 AS_OF_DATE 개념이 의미 있어짐).
  */
 function buildCapaCumulativeFn_(capaInfo, code, year, month, holidaySet) {
   const entry = capaInfo[code];
-  if (!entry || !entry.producedByDate) return null; // capa/스케줄 정보 없는 품목은 검증 자체를 스킵(무제한 취급)
+  // 기초재고/적정재고 둘 다 아예 없으면(기준정보에 이 품목 자체가 없음) 검증 불가 — 스킵.
+  if (!entry || (entry.baseStock === undefined && entry.targetStock === undefined)) return null;
 
   const baseStock = entry.baseStock || 0;
   const targetStock = entry.targetStock || 0;
-  const produced = entry.producedByDate;
+  const produced = entry.producedByDate || {}; // 없으면 생산량 0으로 취급(위 설명 참고)
   const monthStart = new Date(year, month - 1, 1);
 
   return function (date) {

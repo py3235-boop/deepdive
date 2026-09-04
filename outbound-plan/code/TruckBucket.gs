@@ -39,6 +39,14 @@ function buildTruckBucketPlan_(items, year, month, weekday, holidaySet, capaInfo
   // 단위중량 큰 품목부터(같으면 물량 큰 품목부터) 처리
   itemState.sort((a, b) => (b.unitWeight || 0) - (a.unitWeight || 0) || b.remaining - a.remaining);
 
+  // 단위중량을 못 찾은 품목은 조용히 넘어가지 않고 경고를 남긴다 — 이런 품목은 단위중량 배수
+  // 없이(반올림 없이) 통짜로 배정되므로(noUnitWeightItems 경로), 그 사실을 알 수 있어야 한다.
+  itemState.forEach(it => {
+    if (!(it.unitWeight > 0) && it.remaining > 0.0001) {
+      issues.push({ code: it.code, message: '단위중량을 못 찾아 반올림 없이 배정됨(missing_unitweight)' });
+    }
+  });
+
   const totalWeight = itemState.reduce((s, it) => s + it.remaining, 0);
   if (baseDates.length === 0 || totalWeight <= 0) {
     const plan = {};
@@ -225,38 +233,69 @@ function buildTruckBucketPlan_(items, year, month, weekday, holidaySet, capaInfo
   }
 
   // ② 자투리 마무리: 이 업체가 이미 확보해둔 날짜들 중 여유 있는 곳부터 채우고, 그래도 안 되면 새
-  // 날짜를 하나 더 찾고, 그마저 없을 때만 마지막 기준일에 최소한만 초과해서 마무리한다.
+  // 날짜를 하나 더 찾는다. capa가 오래(또는 한 달 내내) 안 열려서 remaining이 자투리 수준을 넘어
+  // 통째로 남아있는 품목도 있을 수 있어서, **한 버킷에 몰아넣지 않고** 트럭 상한을 지키며 여러
+  // 날짜에 나눠 채울 때까지 반복한다. 진짜 마지막 한 조각(단위중량 미만)만 반올림해서 마무리한다
+  // (그래야 트럭 상한 위반 없이, 최대 단위중량 1개만큼의 오차만 남는 원래 취지가 유지된다).
   itemState.filter(it => it.remaining > 0 && it.unitWeight > 0).forEach(it => {
-    let candidates = Object.values(companyBuckets);
-    const hasRoom = candidates.some(b => b.load < b.cap && _floorToUnit_(Math.min(b.cap, b.cap - b.load), it.unitWeight) > 0);
-    if (!hasRoom) {
-      const newDate = _monthWideExtraDate_(year, month, candidates.map(b => b.date), vendorDateLoad, holidaySet, minDate);
-      if (newDate) {
-        getBucket(newDate);
-        candidates = Object.values(companyBuckets);
-      }
-    }
-    if (candidates.length === 0) candidates = [{ date: baseDates[baseDates.length - 1], load: 0, cap: truckKg }];
-
-    // 여기서도 capa가 열려있는 날짜가 있으면 그쪽을 우선한다 — 정말 하나도 없을 때만(월말까지 가도
-    // 생산이 못 따라온 경우) capa를 무시하고 배정해서 최소한 이번 달에 나가긴 나가게 한다.
     const curveFn = buildCapaCumulativeFn_(capaInfo, it.code, year, month, holidaySet);
-    let pickCandidates = candidates;
-    if (curveFn) {
-      const codeLoad = codeDateLoad[it.code] || (codeDateLoad[it.code] = {});
-      const capaOk = candidates.filter(b => (codeLoad[dateKey_(b.date)] || 0) + it.unitWeight <= curveFn(b.date));
-      if (capaOk.length > 0) pickCandidates = capaOk;
-    }
+    const codeLoad = curveFn ? (codeDateLoad[it.code] || (codeDateLoad[it.code] = {})) : null;
 
-    const roundedRemain = _roundToUnit_(it.remaining, it.unitWeight);
-    if (roundedRemain > 0) {
+    let guard = 0;
+    while (it.remaining > 0.0001 && guard < 1000) {
+      guard++;
+
+      let candidates = Object.values(companyBuckets);
+      const hasRoom = candidates.some(b => b.load < b.cap && _floorToUnit_(Math.min(b.cap, b.cap - b.load), it.unitWeight) > 0);
+      if (!hasRoom) {
+        const newDate = _monthWideExtraDate_(year, month, candidates.map(b => b.date), vendorDateLoad, holidaySet, minDate);
+        if (newDate) {
+          getBucket(newDate);
+          candidates = Object.values(companyBuckets);
+        }
+      }
+      if (candidates.length === 0) candidates = [{ date: baseDates[baseDates.length - 1], load: 0, cap: truckKg }];
+
+      // 여기서도 capa가 열려있는 날짜가 있으면 그쪽을 우선한다 — 정말 하나도 없을 때만(월말까지 가도
+      // 생산이 못 따라온 경우) capa를 무시하고 배정해서 최소한 이번 달에 나가긴 나가게 한다.
+      let pickCandidates = candidates;
+      if (curveFn) {
+        const capaOk = candidates.filter(b => (codeLoad[dateKey_(b.date)] || 0) + it.unitWeight <= curveFn(b.date));
+        if (capaOk.length > 0) pickCandidates = capaOk;
+      }
+
       const picked = pickBucket(pickCandidates, it.unitWeight, it.dateMap);
-      const key = dateKey_(picked.bucket.date);
-      it.dateMap[key] = (it.dateMap[key] || 0) + roundedRemain;
-      picked.bucket.load += roundedRemain;
-      recordCodeLoad(it, key, roundedRemain);
+      const best = picked.bucket;
+      const roomLeft = Math.max(0, best.cap - best.load);
+
+      // 남은 물량이 단위중량 미만(진짜 마지막 자투리)이면 반올림해서 끝내고, 그 전까지는 항상
+      // 이 버킷의 남은 자리(트럭 상한) 안쪽으로만(floor) 채운다 — 한 버킷에 몰아넣지 않기 위함.
+      const isFinalFraction = it.remaining < it.unitWeight;
+      let take = isFinalFraction
+        ? Math.min(_roundToUnit_(it.remaining, it.unitWeight), Math.max(roomLeft, it.unitWeight))
+        : _floorToUnit_(Math.min(it.remaining, roomLeft), it.unitWeight);
+      if (take <= 0) take = it.unitWeight; // 자리가 전혀 없는 최후수단 — 그래도 단위중량 1개만큼은 배정
+
+      const key = dateKey_(best.date);
+      it.dateMap[key] = (it.dateMap[key] || 0) + take;
+      best.load += take;
+      it.remaining -= take;
+      recordCodeLoad(it, key, take);
     }
-    it.remaining = 0;
+    it.remaining = 0; // guard 초과 등 극단적인 경우에만 남을 수 있는 나머지는 버림 처리
+  });
+
+  // 자투리 마무리에서 새로 늘어나거나 늘어난 버킷도 vendorDateLoad에 반영한다 — 안 그러면 다른
+  // 업체가 이 날짜를 실제보다 가볍게 보고 여유일로 잘못 고를 수 있다. 이미 보고된 몫은
+  // vendorTrucksReported 기준 델타로만 반영해서 중복/과소 계산을 피한다.
+  Object.keys(companyBuckets).forEach(key => {
+    const b = companyBuckets[key];
+    if (b.load <= 0) return;
+    const trucks = Math.ceil(b.load / CONFIG.TRUCK_KG);
+    const before = vendorTrucksReported[key] || 0;
+    if (trucks === before) return;
+    vendorDateLoad[key] = Math.max(0, (vendorDateLoad[key] || 0) - before + trucks);
+    vendorTrucksReported[key] = trucks;
   });
 
   // ③ 소량 자투리 병합: 배정이 다 끝난 뒤, 어떤 날짜의 배정량이 트럭 절반(MIN_SHIPMENT_KG)보다

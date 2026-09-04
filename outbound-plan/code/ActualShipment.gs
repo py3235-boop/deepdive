@@ -18,12 +18,22 @@ const ACTUAL_COL_ = {
 };
 
 function applyActualShipment() {
+  // generatePlan()과 같은 스크립트 락을 써서, 계획 생성이 아직 돌고 있는 도중에 실적 반영이 같은
+  // 시트/스냅샷 탭을 동시에 건드리는 일을 막는다(Main.gs의 generatePlan() 주석 참고).
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    appendExecutionLog_('applyActualShipment', '경고', '다른 실행이 오래 진행 중이라 이번 실행은 건너뜀');
+    notifyChat_('⏳ 실적 반영: 다른 실행이 아직 진행 중이라 이번 실행은 건너뛰었습니다. 잠시 후 다시 실행해주세요.');
+    return;
+  }
   try {
     _applyActualShipment_();
   } catch (e) {
     appendExecutionLog_('applyActualShipment', '실패', e.message);
     notifyChat_('🚨 실적 반영 실패: ' + e.message);
     throw e;
+  } finally {
+    lock.releaseLock();
   }
 }
 
@@ -86,7 +96,7 @@ function _applyActualShipment_() {
     }
 
     const orderedQty = plannedQty !== undefined ? plannedQty : row.orderedQty;
-    updatedRows.push({ code: row.code, spec: row.spec, vendor: row.vendor, orderedQty: orderedQty, dateMap: newDateMap, changed: false });
+    updatedRows.push({ code: row.code, spec: row.spec, vendor: row.vendor, orderedQty: orderedQty, dateMap: newDateMap, changeType: null });
 
     if (remaining > 0.0001) {
       remainingByVendor[row.vendor] = remainingByVendor[row.vendor] || [];
@@ -172,9 +182,9 @@ function _applyActualShipment_() {
   );
 
   notifyChat_(
-    (issues.length > 0 ? '⚠️ ' : '📦 ') +
+    (issues.length > 0 ? '📋 ' : '📦 ') +
     '실적 반영 완료(기준일: ' + asOfKey + ')\n' +
-    (issues.length > 0 ? '검증 경고 ' + issues.length + '건 (실행이력 탭 참고)' : '이슈 없음') +
+    (issues.length > 0 ? '검증사항 ' + issues.length + '건 (실행이력 탭 참고)' : '이슈 없음') +
     '\n' + SpreadsheetApp.getActiveSpreadsheet().getUrl()
   );
 

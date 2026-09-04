@@ -2,8 +2,12 @@
  * 참고파일(공휴일.xlsx, 기준정보.xlsx, 제품 중량.xlsx 등)을 CONFIG.REFERENCE_FOLDER_ID 폴더(구글
  * 워크스페이스 공유문서함)에서 찾아 읽기 위한 헬퍼.
  *
- * xlsx 파일은 SpreadsheetApp이 바로 못 여니까, 임시로 구글시트 사본으로 변환해서 연 뒤 실행이 끝나면
- * (cleanupReferenceFiles_) 지운다. 이미 구글시트로 올라가 있는 파일이면 변환 없이 그냥 연다.
+ * xlsx 파일은 SpreadsheetApp이 바로 못 여니까, 임시로 구글시트 사본으로 변환해서 연다. 이 변환
+ * 자체가 몇 초~십수 초씩 걸려서, 예전처럼 실행마다(매번 트리거가 돌 때마다) 새로 변환하고 끝에
+ * 지우기를 반복하면 참고파일이 안 바뀌었어도 매번 그 비용을 그대로 문다 — 실행이 느려지는 가장 큰
+ * 원인이었다. 그래서 지금은 변환한 사본을 스크립트 속성에 캐시해두고, 원본 파일이 실제로 바뀌었을
+ * 때(파일 ID나 수정시각이 달라졌을 때)만 다시 변환한다. 이미 구글시트로 올라가 있는 파일이면 원래도
+ * 변환이 필요 없다.
  *
  * 사전 준비(한 번만):
  *  1) Apps Script 편집기 왼쪽 "서비스" + 버튼 → "Drive API"(고급 서비스) 추가
@@ -11,7 +15,7 @@
  *     REFERENCE_FOLDER_ID 에 등록 (폴더를 열었을 때 주소창 .../folders/{여기}가 폴더 ID)
  */
 
-var _refCache_ = {};
+var _refCache_ = {}; // 이번 실행 안에서만 재사용(같은 실행 중 같은 keyword 중복 변환 방지)
 
 function findReferenceFile_(keyword) {
   if (!CONFIG.REFERENCE_FOLDER_ID) {
@@ -31,40 +35,61 @@ function findReferenceFile_(keyword) {
   return best;
 }
 
-/** keyword로 찾은 참고파일을 스프레드시트로 열어서 반환한다(캐시됨, 같은 실행 중 재사용). */
+/** keyword로 찾은 참고파일을 스프레드시트로 열어서 반환한다(원본이 안 바뀌었으면 재변환 없이 캐시 재사용). */
 function getReferenceSpreadsheet_(keyword) {
   if (_refCache_[keyword]) return _refCache_[keyword].ss;
 
   const file = findReferenceFile_(keyword);
-  let ss, tempFileId = null;
 
   if (file.getMimeType() === MimeType.GOOGLE_SHEETS) {
-    ss = SpreadsheetApp.open(file);
-  } else {
-    // xlsx → 구글시트 변환 사본을 임시로 만든다(고급 Drive 서비스 필요).
-    // Drive API 고급 서비스는 v3가 붙으면 Files.insert가 없고 Files.create로 바뀌므로 둘 다 지원한다.
-    tempFileId = Drive.Files.create
-      ? Drive.Files.create({ name: '__tmp_' + file.getName(), mimeType: MimeType.GOOGLE_SHEETS }, file.getBlob()).id // v3
-      : Drive.Files.insert({ title: '__tmp_' + file.getName(), mimeType: MimeType.GOOGLE_SHEETS }, file.getBlob(), { convert: true }).id; // v2
-    ss = SpreadsheetApp.openById(tempFileId);
+    const ss = SpreadsheetApp.open(file);
+    _refCache_[keyword] = { ss: ss };
+    return ss;
   }
 
-  _refCache_[keyword] = { ss: ss, tempFileId: tempFileId };
+  const props = PropertiesService.getScriptProperties();
+  const cacheProp = 'REF_CACHE_' + keyword;
+  const sourceUpdatedAt = String(file.getLastUpdated().getTime());
+  const cached = _readJsonProp_(props, cacheProp);
+
+  if (cached && cached.sourceId === file.getId() && cached.sourceUpdatedAt === sourceUpdatedAt) {
+    // 원본이 지난번 변환 이후 안 바뀜 — 예전에 만들어둔 구글시트 사본을 재변환 없이 그대로 재사용
+    try {
+      const ss = SpreadsheetApp.openById(cached.tempFileId);
+      _refCache_[keyword] = { ss: ss };
+      return ss;
+    } catch (e) {
+      // 캐시된 사본이 지워졌거나 접근 불가 — 아래에서 새로 변환
+    }
+  }
+
+  // 원본이 바뀌었거나 캐시가 없음 — 새로 변환(고급 Drive 서비스 필요)하고 예전 캐시 사본은 정리.
+  // 부모 폴더를 안 정해주면 내 드라이브 루트에 생기므로 REFERENCE_FOLDER_ID 폴더 안에 만들어지도록 명시.
+  // Drive API 고급 서비스는 v3가 붙으면 Files.insert가 없고 Files.create로 바뀌므로 둘 다 지원한다.
+  if (cached && cached.tempFileId) {
+    try { DriveApp.getFileById(cached.tempFileId).setTrashed(true); } catch (e) { /* 이미 지워졌으면 무시 */ }
+  }
+  const tempFileId = Drive.Files.create
+    ? Drive.Files.create({ name: '__cache_' + file.getName(), mimeType: MimeType.GOOGLE_SHEETS, parents: [CONFIG.REFERENCE_FOLDER_ID] }, file.getBlob()).id // v3
+    : Drive.Files.insert({ title: '__cache_' + file.getName(), mimeType: MimeType.GOOGLE_SHEETS, parents: [{ id: CONFIG.REFERENCE_FOLDER_ID }] }, file.getBlob(), { convert: true }).id; // v2
+  props.setProperty(cacheProp, JSON.stringify({ sourceId: file.getId(), sourceUpdatedAt: sourceUpdatedAt, tempFileId: tempFileId }));
+
+  const ss = SpreadsheetApp.openById(tempFileId);
+  _refCache_[keyword] = { ss: ss };
   return ss;
 }
 
-/** generatePlan() 끝에서 한 번 호출 — 변환 과정에서 생긴 임시 구글시트 사본을 휴지통으로 보낸다. */
+function _readJsonProp_(props, key) {
+  try {
+    const raw = props.getProperty(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/** generatePlan() 끝에서 호출 — 캐시 사본은 이제 계속 재사용하므로 지우지 않고, 이번 실행용 메모리 캐시만 비운다. */
 function cleanupReferenceFiles_() {
-  Object.keys(_refCache_).forEach(keyword => {
-    const entry = _refCache_[keyword];
-    if (entry.tempFileId) {
-      try {
-        DriveApp.getFileById(entry.tempFileId).setTrashed(true);
-      } catch (e) {
-        // 이미 지워졌거나 접근 불가하면 무시
-      }
-    }
-  });
   _refCache_ = {};
 }
 

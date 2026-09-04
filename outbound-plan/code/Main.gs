@@ -1,20 +1,42 @@
 /**
- * 메인 실행. year/month를 안 주면 오늘 기준 월로 계획을 만든다.
+ * 메인 실행. year/month를 안 주면 발주서 파일명(예: "2026-10 발주서")에서 뽑은 연/월을 쓴다
+ * (테스트 모드거나 파일을 못 찾으면 오늘 기준 월로 폴백).
+ *
+ * executionType: 메뉴/편집기에서 사람이 직접 실행하면 안 넘기므로 기본값 '수동'. 자동 감지
+ * 트리거(AutoTrigger.gs)가 부를 때만 '자동'을 넘긴다 — 챗 알림/실행이력에 어느 쪽이었는지 남긴다.
  */
-function generatePlan(year, month) {
+function generatePlan(year, month, executionType) {
+  executionType = executionType === '자동' ? '자동' : '수동';
+
+  // 동시 실행 방지 — 자동 감지 트리거가 돌고 있는 도중에 수동으로 또 실행하거나, 트리거가 겹쳐
+  // 실행되면 saveOrderSnapshot_/saveFingerprints_의 "탭 있으면 쓰고 없으면 만들어라" 로직이 동시에
+  // 같은 탭을 만들려다 "이름이 'X'인 시트가 이미 있습니다" 오류로 실패한다. 같은 스크립트 안의 다른
+  // 실행(applyActualShipment 포함)과도 겹치지 않게 스크립트 전체 락을 잡는다. 최대 30초까지 기다려도
+  // 못 잡으면(다른 실행이 비정상적으로 오래 걸리는 상황) 조용히 묻히지 않도록 경고로 남긴다.
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) {
+    appendExecutionLog_('generatePlan', '경고', executionType + ' 실행, 다른 실행이 오래 진행 중이라 이번 실행은 건너뜀');
+    notifyChat_('⏳ [' + executionType + '실행] 출고계획: 다른 실행이 아직 진행 중이라 이번 실행은 건너뛰었습니다. 발주서가 바뀐 상태라면 잠시 후 다시 실행해주세요.');
+    return;
+  }
   try {
-    _generatePlan_(year, month);
+    _generatePlan_(year, month, executionType);
   } catch (e) {
-    appendExecutionLog_('generatePlan', '실패', e.message);
-    notifyChat_('🚨 출고계획 생성 실패: ' + e.message);
+    appendExecutionLog_('generatePlan', '실패', executionType + ' 실행, ' + e.message);
+    notifyChat_('🚨 [' + executionType + '실행] 출고계획 생성 실패: ' + e.message);
     throw e; // 편집기/시트에 원래 에러가 그대로 보이게 다시 던짐
+  } finally {
+    lock.releaseLock();
   }
 }
 
-function _generatePlan_(year, month) {
-  const today = new Date();
-  year = year || today.getFullYear();
-  month = month || today.getMonth() + 1;
+function _generatePlan_(year, month, executionType) {
+  executionType = executionType === '자동' ? '자동' : '수동';
+  if (!year || !month) {
+    const ym = resolveOrderFileYearMonth_();
+    year = year || ym.year;
+    month = month || ym.month;
+  }
 
   const orderResult = loadOrderStatus();
   const orders = orderResult.orders;
@@ -28,13 +50,13 @@ function _generatePlan_(year, month) {
   if (fingerprintsUnchanged_(previousFingerprints, currentFingerprints)) {
     // 재계산 자체는 건너뛰더라도, 발주서 탭이 깨져서 업체가 통째로 빠진 문제는 스킵 여부와
     // 무관하게 매번 알려야 한다 — 안 그러면 "발주 안 바뀜"으로 매번 스킵되면서 이 경고도 계속 묻힌다.
-    const skipMsg = '발주 데이터가 지난 실행과 동일 — 재계산 건너뜀'
+    const skipMsg = executionType + ' 실행, 발주 데이터가 지난 실행과 동일 — 재계산 건너뜀'
       + (orderIssues.length > 0 ? '\n' + orderIssues.map(i => i.vendor + ': ' + i.message).join('\n') : '');
     appendExecutionLog_('generatePlan', orderIssues.length > 0 ? '경고' : '스킵', skipMsg);
     notifyChat_(
-      (orderIssues.length > 0 ? '⚠️ ' : 'ℹ️ ') +
+      'ℹ️ [' + executionType + '실행] ' +
       '출고계획: 발주서가 지난 실행과 동일해서 재계산을 건너뛰었습니다.' +
-      (orderIssues.length > 0 ? '\n검증 경고 ' + orderIssues.length + '건(실행이력 탭 참고)' : '')
+      (orderIssues.length > 0 ? '\n검증사항 ' + orderIssues.length + '건(실행이력 탭 참고)' : '')
     );
     SpreadsheetApp.getActiveSpreadsheet().toast(
       '발주서가 지난 실행과 똑같아서 계획을 다시 만들지 않았습니다. 강제로 다시 만들려면 forceRegeneratePlan()을 실행하세요.',
@@ -119,12 +141,21 @@ function _generatePlan_(year, month) {
 
   rows.sort((a, b) => (a.vendor + a.code).localeCompare(b.vendor + b.code));
 
-  // 신규 품목(스냅샷에 없음) / 변경된 품목(발주량이 지난번과 다름)에 changed 표시 — WritePlan.gs가 강조해서 그림
+  // 신규 품목(스냅샷에 없음)과 변경된 품목(발주량이 지난번과 다름)을 구분해서 표시 — WritePlan.gs가
+  // 이 둘을 서로 다른 색으로 강조해서 그린다(데모에서 "뭐가 새로 생겼고 뭐가 바뀌었는지" 한눈에 보이게).
   rows.forEach(row => {
     const key = row.vendor + '|' + row.code + '|' + row.spec;
     const prevQty = previousSnapshot[key];
     const currentQty = itemQtyMap[key];
-    row.changed = !isFirstSnapshot && (prevQty === undefined || Math.abs(prevQty - currentQty) > 0.01);
+    if (isFirstSnapshot) {
+      row.changeType = null; // 비교 대상 자체가 없는 첫 실행은 전부 "안 바뀜"으로 둔다
+    } else if (prevQty === undefined) {
+      row.changeType = 'new';
+    } else if (Math.abs(prevQty - currentQty) > 0.01) {
+      row.changeType = 'changed';
+    } else {
+      row.changeType = null;
+    }
   });
 
   writePlanSheet(year, month, rows, { holidaySet: holidaySet, issueCount: allIssues.length, viewMode: 'item' });
@@ -146,27 +177,28 @@ function _generatePlan_(year, month) {
 
   const messages = [];
   if (unknownVendors.size > 0) messages.push('타입 매핑 없는 업체 제외: ' + Array.from(unknownVendors).join(', '));
-  if (allIssues.length > 0) messages.push('검증 경고 ' + allIssues.length + '건 (실행이력 탭 참고)');
+  if (allIssues.length > 0) messages.push('검증사항 ' + allIssues.length + '건 (실행이력 탭 참고)');
 
   // 챗 알림에는 건수만이 아니라 몇 품목 중 몇 개가 신규/변경인지, 결과 시트 링크까지 넣어서
   // 알림만 보고도 바로 클릭해서 확인할 수 있게 한다.
-  const changedCount = rows.filter(r => r.changed).length;
+  const newCount = rows.filter(r => r.changeType === 'new').length;
+  const changedCount = rows.filter(r => r.changeType === 'changed').length;
   notifyChat_(
-    (messages.length ? '⚠️ ' : '📦 ') +
+    (messages.length ? '📋 ' : '📦 ') + '[' + executionType + '실행] ' +
     year + '년 ' + month + '월 출고계획 생성 완료\n' +
-    '품목 ' + rows.length + '개(신규/변경 ' + changedCount + '개)' +
+    '품목 ' + rows.length + '개(신규 ' + newCount + '개 · 변경 ' + changedCount + '개)' +
     (messages.length ? '\n' + messages.join('\n') : '') +
     '\n' + SpreadsheetApp.getActiveSpreadsheet().getUrl()
   );
 
   // 실행이력 탭에 남길 메시지 — 건수만이 아니라 실제 경고 내용을 그대로 적는다.
-  const logLines = [];
+  const logLines = [executionType + ' 실행'];
   if (unknownVendors.size > 0) logLines.push('타입 매핑 없는 업체 제외: ' + Array.from(unknownVendors).join(', '));
   if (allIssues.length > 0) logLines.push.apply(logLines, allIssues);
   appendExecutionLog_(
     'generatePlan',
-    logLines.length > 0 ? '경고' : '완료',
-    logLines.length > 0 ? logLines.join('\n') : (year + '년 ' + month + '월 계획 생성, 이슈 없음')
+    allIssues.length > 0 || unknownVendors.size > 0 ? '경고' : '완료',
+    logLines.length > 1 ? logLines.join('\n') : (year + '년 ' + month + '월 계획 생성, 이슈 없음 (' + executionType + ' 실행)')
   );
 
   Logger.log([
@@ -215,6 +247,11 @@ function onOpen() {
     .addItem('③ 회사별로 보기', 'showByVendor')
     .addItem('④ 품목별로 보기 (기본)', 'showByItem')
     .addSeparator()
-    .addItem('⑤ 테스트 발주서 생성 (디버깅용)', 'createTestOrderStatus')
+    .addItem('⑤ 초기화 (데모용, 헤더만 남김)', 'resetPlan')
+    .addSeparator()
+    .addItem('발주서 자동 감지 시작 (데모용)', 'installOrderWatchTrigger')
+    .addItem('발주서 자동 감지 중지', 'removeOrderWatchTrigger')
+    .addSeparator()
+    .addItem('⑥ 테스트 발주서 생성 (디버깅용)', 'createTestOrderStatus')
     .addToUi();
 }

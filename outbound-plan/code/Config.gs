@@ -16,7 +16,9 @@ const CONFIG = {
   // 구글챗 스페이스에 등록한 수신 웹훅 URL. 스크립트 속성에 CHAT_WEBHOOK_URL로 등록.
   // 비어있으면 알림을 그냥 스킵한다(에러 아님) — 필수 기능이 아니라 있으면 켜지는 부가 기능.
   CHAT_WEBHOOK_URL: PropertiesService.getScriptProperties().getProperty('CHAT_WEBHOOK_URL') || null,
-  PLAN_SHEET_NAME: '출고계획', // 출고계획 결과를 쓸 탭 이름 — 이 이름의 탭(없으면 첫 탭)에 그대로 덮어씀
+  // resetPlan()이 만드는 빈 "기본 시트" 탭 이름. 실제 계획 데이터는 이 이름이 아니라 매번
+  // "N월 출고계획"이라는 별도 탭에 쓰고 항상 맨 앞(1번째)으로 옮긴다(WritePlan.gs 참고).
+  PLAN_SHEET_NAME: '기본 시트',
   // 하루 상한은 항상 업체별 독립으로 정확히 트럭 1대 — 물량이 많으면 트럭을 더 싣는 게 아니라
   // 그 업체의 배송일 자체를 늘린다.
   TRUCK_KG: 5000,

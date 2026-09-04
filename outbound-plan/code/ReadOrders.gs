@@ -31,17 +31,18 @@ function loadOrderStatus() {
 }
 
 function _detectVendorFromSheetName_(sheetName) {
+  // "고객사 A 원본"처럼 원본/참고용으로 같이 남겨둔 탭은 변환된 표가 아니므로 발주서 탭 대상에서
+  // 제외한다 — 안 그러면 "고객사 X" 패턴에 걸린다는 이유만으로 이 탭까지 읽으려다 딥다이브 마커를
+  // 못 찾아 sheet_columns_missing 경고가 잘못 뜬다.
+  if (sheetName.indexOf('원본') !== -1) return null;
   const m = sheetName.match(/고객사\s*([A-Za-z])/);
   return m ? '고객사' + m[1].toUpperCase() : null;
 }
 
-var _orderTempFileId_ = null;
-
-function _resolveOrderSpreadsheet_() {
-  if (!CONFIG.ORDER_FOLDER_ID) {
-    // 테스트 모드: 이 스프레드시트 자체 안의 "고객사 A/B/C" 탭을 발주서로 취급
-    return SpreadsheetApp.getActiveSpreadsheet();
-  }
+/** ORDER_FOLDER_ID 폴더에서 'YYYY-MM 발주서'로 시작하는 파일 중 가장 최근에 수정된 것을 찾는다.
+ *  테스트 모드(ORDER_FOLDER_ID 없음)면 null. AutoTrigger.gs가 파일 변경 감지용으로도 재사용한다. */
+function _findLatestOrderFile_() {
+  if (!CONFIG.ORDER_FOLDER_ID) return null;
 
   const folder = DriveApp.getFolderById(CONFIG.ORDER_FOLDER_ID);
   const it = folder.getFiles();
@@ -51,6 +52,31 @@ function _resolveOrderSpreadsheet_() {
     if (!/^\d{4}-\d{2}\s*발주서/.test(f.getName())) continue;
     if (!best || f.getLastUpdated() > best.getLastUpdated()) best = f;
   }
+  return best;
+}
+
+/**
+ * 발주서 파일명("2026-10 발주서...")에서 연/월을 뽑는다 — 그 발주서가 몇 월치인지는 오늘 날짜가
+ * 아니라 파일명에 적힌 값을 기준으로 삼아야, 다음 달 발주서를 미리 올려놔도 그 달 계획으로 잡힌다.
+ * 테스트 모드거나 파일을 못 찾으면(파일명에서 못 뽑으면) 오늘 날짜로 폴백한다.
+ */
+function resolveOrderFileYearMonth_() {
+  const file = _findLatestOrderFile_();
+  if (file) {
+    const m = file.getName().match(/^(\d{4})-(\d{2})\s*발주서/);
+    if (m) return { year: Number(m[1]), month: Number(m[2]) };
+  }
+  const today = new Date();
+  return { year: today.getFullYear(), month: today.getMonth() + 1 };
+}
+
+function _resolveOrderSpreadsheet_() {
+  if (!CONFIG.ORDER_FOLDER_ID) {
+    // 테스트 모드: 이 스프레드시트 자체 안의 "고객사 A/B/C" 탭을 발주서로 취급
+    return SpreadsheetApp.getActiveSpreadsheet();
+  }
+
+  const best = _findLatestOrderFile_();
   if (!best) {
     throw new Error("ORDER_FOLDER_ID 폴더에서 'YYYY-MM 발주서' 파일을 못 찾았습니다.");
   }
@@ -59,25 +85,39 @@ function _resolveOrderSpreadsheet_() {
     return SpreadsheetApp.open(best);
   }
 
-  // xlsx 등은 구글시트 변환 사본을 임시로 만들어서 읽는다(고급 Drive 서비스 필요).
-  // Drive API 고급 서비스는 v3가 붙으면 Files.insert가 없고 Files.create로 바뀌므로 둘 다 지원한다.
+  // xlsx는 구글시트 변환 사본을 만들어서 읽는다(고급 Drive 서비스 필요) — 이 변환 자체가 몇 초씩
+  // 걸리는데, 자동 감지 트리거는 발주서가 바뀔 때만 generatePlan()을 부르므로 그때마다 매번 새로
+  // 변환해도 원래 큰 낭비는 아니지만, 수동으로 여러 번 다시 실행할 때도 매번 재변환하던 걸 참고파일과
+  // 같은 방식으로 캐시해서 없앤다 — 발주서 파일이 실제로 안 바뀌었으면(같은 파일ID·같은 수정시각)
+  // 재변환 없이 지난번 변환 사본을 그대로 재사용한다. 부모 폴더를 안 정해주면 내 드라이브 루트에
+  // 생기므로 ORDER_FOLDER_ID 폴더 안에 만들어지도록 명시한다. Drive API 고급 서비스는 v3가 붙으면
+  // Files.insert가 없고 Files.create로 바뀌므로 둘 다 지원한다.
+  const props = PropertiesService.getScriptProperties();
+  const cacheProp = 'ORDER_FILE_CACHE';
+  const sourceUpdatedAt = String(best.getLastUpdated().getTime());
+  const cached = _readJsonProp_(props, cacheProp);
+
+  if (cached && cached.sourceId === best.getId() && cached.sourceUpdatedAt === sourceUpdatedAt) {
+    try {
+      return SpreadsheetApp.openById(cached.tempFileId);
+    } catch (e) {
+      // 캐시된 사본이 지워졌거나 접근 불가 — 아래에서 새로 변환
+    }
+  }
+
+  if (cached && cached.tempFileId) {
+    try { DriveApp.getFileById(cached.tempFileId).setTrashed(true); } catch (e) { /* 이미 지워졌으면 무시 */ }
+  }
   const tempFileId = Drive.Files.create
-    ? Drive.Files.create({ name: '__tmp_' + best.getName(), mimeType: MimeType.GOOGLE_SHEETS }, best.getBlob()).id // v3
-    : Drive.Files.insert({ title: '__tmp_' + best.getName(), mimeType: MimeType.GOOGLE_SHEETS }, best.getBlob(), { convert: true }).id; // v2
-  _orderTempFileId_ = tempFileId;
+    ? Drive.Files.create({ name: '__cache_' + best.getName(), mimeType: MimeType.GOOGLE_SHEETS, parents: [CONFIG.ORDER_FOLDER_ID] }, best.getBlob()).id // v3
+    : Drive.Files.insert({ title: '__cache_' + best.getName(), mimeType: MimeType.GOOGLE_SHEETS, parents: [{ id: CONFIG.ORDER_FOLDER_ID }] }, best.getBlob(), { convert: true }).id; // v2
+  props.setProperty(cacheProp, JSON.stringify({ sourceId: best.getId(), sourceUpdatedAt: sourceUpdatedAt, tempFileId: tempFileId }));
   return SpreadsheetApp.openById(tempFileId);
 }
 
-/** generatePlan() 끝에서 호출 — 발주서 xlsx 변환 과정에서 생긴 임시 사본을 정리한다. */
+/** generatePlan() 끝에서 호출됨 — 발주서 변환 사본은 이제 계속 캐시로 재사용하므로 더 지울 게 없다. */
 function cleanupOrderFile_() {
-  if (_orderTempFileId_) {
-    try {
-      DriveApp.getFileById(_orderTempFileId_).setTrashed(true);
-    } catch (e) {
-      // 이미 지워졌거나 접근 불가하면 무시
-    }
-    _orderTempFileId_ = null;
-  }
+  // no-op: getReferenceSpreadsheet_와 같은 이유로 캐시를 유지한다(ReferenceFiles.gs 참고)
 }
 
 function _readOrderSheet_(sheet, vendor) {
@@ -87,11 +127,14 @@ function _readOrderSheet_(sheet, vendor) {
   }
 
   const markerRow = values[0];
-  const startCol = markerRow.findIndex(v => String(v).trim() === CONFIG.DEEP_DIVE_MARKER);
+  // 마커 셀이 "딥다이브" 하나만 딱 들어있지 않고 다른 글자와 같이 있어도 인식되게, 완전 일치
+  // 대신 "포함" 여부로 확인한다(예: "딥다이브(변환결과)"처럼 부가 텍스트가 붙어있는 경우 대비).
+  const startCol = markerRow.findIndex(v => String(v).indexOf(CONFIG.DEEP_DIVE_MARKER) !== -1);
   if (startCol === -1) {
     // 마커 없으면 발주서 표가 아니라고 보고 스킵하지만, "고객사 X" 탭인데 마커가 없다는 건
-    // 서식이 깨졌을 가능성이 높으므로 조용히 넘기지 않고 경고를 남긴다.
-    return { orders: [], issues: [{ vendor: vendor, message: '1행에서 "' + CONFIG.DEEP_DIVE_MARKER + '" 마커를 못 찾아 이 업체 발주 전체가 제외됨(sheet_columns_missing)' }] };
+    // 서식이 깨졌을 가능성이 높으므로 조용히 넘기지 않고 경고를 남긴다. 실제로 1행에 뭐가
+    // 들어있었는지도 같이 남겨서, 원인(다른 파일이 읽혔는지/마커 표기가 다른지)을 바로 알 수 있게 한다.
+    return { orders: [], issues: [{ vendor: vendor, message: '1행에서 "' + CONFIG.DEEP_DIVE_MARKER + '" 마커를 못 찾아 이 업체 발주 전체가 제외됨(sheet_columns_missing) — 실제 1행: ' + JSON.stringify(markerRow) }] };
   }
 
   const headerRow = values[1].slice(startCol);
