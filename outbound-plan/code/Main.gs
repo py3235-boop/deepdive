@@ -16,7 +16,9 @@ function _generatePlan_(year, month) {
   year = year || today.getFullYear();
   month = month || today.getMonth() + 1;
 
-  const orders = loadOrderStatus();
+  const orderResult = loadOrderStatus();
+  const orders = orderResult.orders;
+  const orderIssues = orderResult.issues; // 발주서 탭에서 마커/필수 컬럼을 못 찾아 업체가 통째로 빠진 경우(sheet_columns_missing)
   const byVendor = _groupByVendor_(orders);
   const originalByVendor = Object.assign({}, byVendor); // 아래서 byVendor를 지워가며 순회하므로 스냅샷용 원본을 따로 보관
 
@@ -24,8 +26,16 @@ function _generatePlan_(year, month) {
   const currentFingerprints = buildOrderFingerprints_(orders);
   const previousFingerprints = loadPreviousFingerprints_();
   if (fingerprintsUnchanged_(previousFingerprints, currentFingerprints)) {
-    appendExecutionLog_('generatePlan', '스킵', '발주 데이터가 지난 실행과 동일 — 재계산 건너뜀');
-    notifyChat_('ℹ️ 출고계획: 발주서가 지난 실행과 동일해서 재계산을 건너뛰었습니다.');
+    // 재계산 자체는 건너뛰더라도, 발주서 탭이 깨져서 업체가 통째로 빠진 문제는 스킵 여부와
+    // 무관하게 매번 알려야 한다 — 안 그러면 "발주 안 바뀜"으로 매번 스킵되면서 이 경고도 계속 묻힌다.
+    const skipMsg = '발주 데이터가 지난 실행과 동일 — 재계산 건너뜀'
+      + (orderIssues.length > 0 ? '\n' + orderIssues.map(i => i.vendor + ': ' + i.message).join('\n') : '');
+    appendExecutionLog_('generatePlan', orderIssues.length > 0 ? '경고' : '스킵', skipMsg);
+    notifyChat_(
+      (orderIssues.length > 0 ? '⚠️ ' : 'ℹ️ ') +
+      '출고계획: 발주서가 지난 실행과 동일해서 재계산을 건너뛰었습니다.' +
+      (orderIssues.length > 0 ? '\n검증 경고 ' + orderIssues.length + '건(실행이력 탭 참고)' : '')
+    );
     SpreadsheetApp.getActiveSpreadsheet().toast(
       '발주서가 지난 실행과 똑같아서 계획을 다시 만들지 않았습니다. 강제로 다시 만들려면 forceRegeneratePlan()을 실행하세요.',
       '스킵',
@@ -55,6 +65,7 @@ function _generatePlan_(year, month) {
   const rows = [];
   const unknownVendors = new Set();
   const allIssues = [];
+  orderIssues.forEach(i => allIssues.push(i.vendor + ': ' + i.message));
   const vendorDateLoad = {}; // 전사 날짜별 부하(kg) — 공휴일 시프트 때 "가장 한가한 날"을 고르는 기준으로 업체 간 공유
 
   // 요일 고정형(균등분배)을 먼저 처리하고 트럭버킷(여유일을 유동적으로 고름)을 나중에 처리한다 —
@@ -198,11 +209,12 @@ function _groupByVendor_(orders) {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('출고계획 실행')
-    .addItem('① 테스트 발주서 생성', 'createTestOrderStatus')
-    .addItem('② 계획 생성', 'generatePlan')
-    .addItem('③ 실적 반영', 'applyActualShipment')
+    .addItem('① 계획 생성', 'generatePlan')
+    .addItem('② 실적 반영', 'applyActualShipment')
     .addSeparator()
-    .addItem('④ 회사별로 보기', 'showByVendor')
-    .addItem('⑤ 품목별로 보기 (기본)', 'showByItem')
+    .addItem('③ 회사별로 보기', 'showByVendor')
+    .addItem('④ 품목별로 보기 (기본)', 'showByItem')
+    .addSeparator()
+    .addItem('⑤ 테스트 발주서 생성 (디버깅용)', 'createTestOrderStatus')
     .addToUi();
 }

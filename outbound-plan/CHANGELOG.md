@@ -37,6 +37,10 @@
   Drive API v3 환경에서는 없어서 실패했다. `Drive.Files.create`(v3)/`insert`(v2) 둘 다 지원하도록
   분기 처리했다.
 - `Holidays.gs`, `WeightLookup.gs`를 `ReferenceFiles.gs`로 통합(파일 수 정리).
+- **업체 발주 전체가 조용히 누락되던 문제** — 발주서 탭이 "고객사 X" 이름은 맞는데 "딥다이브" 마커나
+  품목코드/중량 헤더를 못 찾으면, 그 업체 발주가 경고 없이 통째로 빠졌다. 이제 `loadOrderStatus()`가
+  이런 경우를 issues로 반환해서 검증 경고·실행이력·챗 알림에 노출한다(재계산을 스킵하는 실행에서도
+  이 경고만은 매번 알린다).
 
 ## WritePlan.gs
 
