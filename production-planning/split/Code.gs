@@ -448,7 +448,26 @@ function convertOrderToPlan(opts) {
     }
     toProcess.push({ file: f, stamp });
   });
-  if (!toProcess.length) return finish();
+  if (!toProcess.length) {
+    /* 바뀐 파일이 없어 변환할 게 없다 — 그래도 알림은 보낸다.
+     * 조용히 끝내면 수동 실행에서 생산계획 알림만 와서 "변환이 왜 안 됐지?"로 읽힌다.
+     * 자동 실행과 같은 모양으로 "변경 없음"을 알려준다 (사용자 지시 2026-09-04). */
+    const shipNow = openShip_({ create: false });
+    if (shipNow) {
+      const rows = readShipRows_(shipNow);
+      result.shipRows = rows.length;
+      result.shipKg = rows.reduce((s, r) => s + r.출하량, 0);
+      result.shipUrl = shipNow.getUrl();
+    }
+    const skipMsg = [
+      `출고계획 변환 — 변경 없음 (${fmtDate_(new Date(), 'yyyy-MM-dd HH:mm')})`,
+      ...result.skipped.map(k => `- ${k.folderPath}/${k.name}: 지난 처리 이후 바뀌지 않아 건너뜀`),
+      `출하계획: 추가 0건 · 변경 0건 · 삭제 0건 · 동일 ${result.shipRows}건 → 총 ${result.shipRows}행 ${Math.round(result.shipKg).toLocaleString()}kg`,
+    ];
+    if (result.shipUrl) skipMsg.push(`출하계획 파일: ${freshLink_(result.shipUrl, fmtDate_(new Date(), 'yyMMdd-HHmm'))}`);
+    notify_(skipMsg.join('\n'), String(opts.label || '👤 [수동실행]').replace(/^[^\[]*/, '✅ '));
+    return finish();
+  }
 
   /* 2) melt — 가로 날짜형 → 세로 4열. 파일 하나가 실패해도 나머지는 계속(경고만) */
   const melted = [];
@@ -496,15 +515,18 @@ function convertOrderToPlan(opts) {
 
   /* 5) 알림 */
   const msg = [
-    /* 첫 줄 ✅ — 채팅방에서 생산계획 생성 알림과 한눈에 구분되게 (사용자 지시 2026-09-04) */
-    `✅ 출고계획 변환 완료 (${fmtDate_(new Date(), 'yyyy-MM-dd HH:mm')})`,
+    `출고계획 변환 완료 (${fmtDate_(new Date(), 'yyyy-MM-dd HH:mm')})`,
     ...result.processed.map(p => `- ${p.folderPath}/${p.name}: ${p.rows}건 ${Math.round(p.kg).toLocaleString()}kg`),
     `출하계획: 추가 ${result.added}건 · 변경 ${result.updated}건 · 삭제 ${result.removed}건 · 동일 ${result.unchanged}건 → 총 ${result.shipRows}행 ${Math.round(result.shipKg).toLocaleString()}kg`,
-    `출하계획 파일: ${result.shipUrl}`,
+    `출하계획 파일: ${freshLink_(result.shipUrl, fmtDate_(new Date(), 'yyMMdd-HHmm'))}`,
   ].join('\n');
   /* 실행 주체 표시 — 트리거로 돌아온 변환은 자동, 사람이 직접 실행한 것은 수동.
-   * runAll이 감지 사유로 판단한 라벨을 넘겨준다 (사용자 지시 2026-09-04). */
-  notify_(msg, opts.label || '👤 [수동실행]');
+   * runAll이 감지 사유로 판단한 라벨을 넘겨준다 (사용자 지시 2026-09-04).
+   * 다만 아이콘은 ✅ 로 바꿔 단다 — 채팅방에서 생산계획 생성 알림과 한눈에 구분되게
+   * (사용자 지시 2026-09-04: 로봇·사람 아이콘 자리에 체크를 넣는다).
+   * `[자동실행]`·`[수동실행]` 글자는 남기므로 카드 색(파랑·초록)은 그대로다. */
+  const convLabel = String(opts.label || '👤 [수동실행]').replace(/^[^\[]*/, '✅ ');
+  notify_(msg, convLabel);
   return finish();
 }
 
@@ -1135,12 +1157,32 @@ function runAll(reason) {
         const lastEnd = plannedJobs.reduce((t, j) => (!t || j.종료일시 > t) ? j.종료일시 : t, null);
         lines.push(`✅ 납기 충족 가능${lastEnd ? ` — 마지막 완료예정 ${fmtDate_(lastEnd, 'MM/dd HH:mm')}` : ''}`);
       }
-      lines.push(`변경 표시: 신규 ${statusCounts.신규}건 · 변경 ${statusCounts.변경}건 · 확정 ${statusCounts.확정}건 · 완료 ${statusCounts.완료}건`);
+    }
+
+    /* 생산계획이 지난 계획과 무엇이 달라졌는지 — 건수와 규격 이동을 함께 보여준다.
+     * 출고계획 변환 쪽에만 변경 건수가 있고 생산계획에는 없어 비교가 안 된다는 지적 반영 (사용자 지시 2026-09-04). */
+    const changedCnt = statusCounts.신규 + statusCounts.변경;
+    if (changedCnt) {
+      lines.push(`생산계획 변경: 신규 ${statusCounts.신규}건 · 변경 ${statusCounts.변경}건`
+        + `${statusCounts.확정 ? ` · 확정 ${statusCounts.확정}건` : ''}${statusCounts.완료 ? ` · 완료 ${statusCounts.완료}건` : ''}`);
+      /* 호기당 1줄이므로 최대 10줄 — 바뀐 호기를 빠짐없이 보여준다 */
+      changedSpecLines_(plan.jobs, data, CFG.MACHINES.length).forEach(t => lines.push(`  - ${t}`));
+    } else {
+      lines.push(`생산계획 변경: 없음 (지난 계획과 동일)`);
     }
     lines.push(`대상월 ${pub.month.label} / 총 ${plannedJobs.length}건 · 총 ${Math.round(totalKg).toLocaleString()}kg / 교체 ${changeovers}회 / 납기위험 ${lateItems.length ? lateItems.join(', ') : '없음'}` +
       (plan.carryOver && plan.carryOver.length ? ` / 이월 ${plan.carryOver.length}건` : '') +
       (conv && conv.processed.length ? ` / 출고계획 반영 ${conv.processed.map(p => p.name).join(', ')}` : ''));
-    lines.push('', '📄 생성된 파일:', `${planId}_${CFG.FILE_NAMES.RESULT}: ${backupUrl}`, `최신 계획: ${resultUrl}`);
+    /* 사본은 실행마다 새 파일이라 주소가 원래 다르고, 최신 계획은 고정 주소라
+     * 계획ID를 꼬리표로 붙여 매번 새 링크로 보이게 한다 (파일은 같다). */
+    lines.push('', '📄 생성된 파일:', `${planId}_${CFG.FILE_NAMES.RESULT}: ${backupUrl}`, `최신 계획: ${freshLink_(resultUrl, planId)}`);
+    /* 현장 배포용 — 호기별 작업지시서가 든 폴더. 반장에게 자기 호기 파일만 주면 되지만
+     * 담당자는 폴더 하나로 열 명분을 한 번에 연다 (사용자 요청 2026-09-04).
+     * 폴더를 못 열어도 알림은 나가야 하므로 실패는 조용히 넘긴다. */
+    try {
+      const woUrl = openWorkOrderFolder_().getUrl();
+      if (woUrl) lines.push(`호기별 작업지시서: ${freshLink_(woUrl, planId)}`);
+    } catch (e) { Logger.log('[알림] 작업지시서 폴더 링크 생략: ' + e.message); }
     notify_(lines.join('\n'), label);
 
     Logger.log(`[runAll] 완료 ${planId} · ${reason} · 작업 ${plan.jobs.length}건 · ${Math.round(totalKg).toLocaleString()}kg · 교체 ${changeovers} · 납기위험 ${plan.lateDemands.length} · ${sec}초`);
@@ -1154,6 +1196,51 @@ function runAll(reason) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * 이번 계획에서 달라진 작업을 "호기 · 이전 규격 → 이번 규격" 한 줄씩으로 만든다 (알림용).
+ *
+ * **호기당 한 건만** 쓴다 — 그 호기에서 가장 먼저 닥치는(순번이 빠른) 신규·변경 작업이다
+ * (사용자 지시 2026-09-04). 현장이 알아야 할 것은 "이 호기에서 다음에 뭐가 바뀌나"이지
+ * 그 호기의 변경 내역 전부가 아니다.
+ *
+ * 이전 규격은 그 호기에서 **바로 앞 작업의 규격**이고, 첫 작업이면 [설비규격교체현황]의 초기 규격이다.
+ * 규격이 그대로면 화살표 없이 규격 하나만 쓴다(수량·시각만 바뀐 경우).
+ * @param {Array} jobs   작업목록 (상태 컬럼이 채워진 뒤)
+ * @param {object} data  loadData_ 결과 (capa·currentItem 사용)
+ * @param {number} limit 최대 줄 수 — 넘으면 "외 N건"으로 줄인다
+ * @returns {Array<string>} 호기 이름순, 호기당 최대 1줄
+ */
+function changedSpecLines_(jobs, data, limit) {
+  const capa = data.capa || {};
+  const specOf = (item) => (capa[item] && capa[item].규격) ? capa[item].규격 : item;
+
+  /* 호기별로 순번 순서대로 훑으면서 규격이 어떻게 이어지는지 따라간다 */
+  const byMachine = {};
+  jobs.forEach(j => { (byMachine[j.호기] = byMachine[j.호기] || []).push(j); });
+
+  const out = [];
+  Object.keys(byMachine).sort().forEach(m => {
+    const seq = byMachine[m].slice().sort((a, b) => a.순번 - b.순번);
+    const initItem = (data.currentItem || {})[m];
+    let prev = initItem ? specOf(initItem) : '';
+    /* 규격 흐름을 따라가되, 기록은 가장 먼저 닥치는 변경 한 건에서 멈춘다 */
+    let done = false;
+    seq.forEach(j => {
+      const now = j.규격 || specOf(j.품목코드);
+      if (!done && (j.상태 === '신규' || j.상태 === '변경')) {
+        const move = (prev && prev !== now) ? `${prev} → ${now}` : now;
+        out.push(`${m} ${move}${j.출하일 ? ' (' + fmtDate_(j.출하일, 'MM/dd') + ' 출하)' : ''}`);
+        done = true;
+      }
+      prev = now;
+    });
+  });
+  if (limit && out.length > limit) {
+    return out.slice(0, limit).concat([`외 ${out.length - limit}건`]);
+  }
+  return out;
 }
 
 /** 트리거 사유 → 알림 둘째 줄 문장 */

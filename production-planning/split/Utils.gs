@@ -370,6 +370,24 @@ function findExistingCopy_(folder, srcName) {
   return hits[0];
 }
 
+/**
+ * 알림에 넣을 링크 — 같은 파일이지만 **실행마다 주소가 달라 보이게** 꼬리표를 붙인다.
+ *
+ * 결과 파일은 링크·QR이 바뀌면 안 되므로 매번 새로 만들지 않고 내용만 덮어쓴다.
+ * 그러다 보니 채팅방의 "최신 계획" 링크가 늘 같은 주소여서 브라우저가 이미 방문한 링크로
+ * 보라색 처리하고, 새 계획이 온 티가 나지 않는다 (사용자 지적 2026-09-04).
+ *
+ * 쿼리 문자열만 덧붙이므로 **여는 파일은 그대로**다. 꼬리표 없는 원래 주소도 계속 유효하다.
+ * @param {string} url 파일 URL (getUrl())
+ * @param {string} tag 실행을 구분할 값 (계획ID 등)
+ * @returns {string}
+ */
+function freshLink_(url, tag) {
+  if (!url) return url;
+  const t = String(tag || fmtDate_(new Date(), 'yyMMdd-HHmm')).replace(/[^\w-]/g, '');
+  return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'plan=' + t;
+}
+
 /** 탭이 없으면 만들고 있으면 그대로 반환 (결과 파일 탭 보장용) */
 function ensureSheet_(ss, name) {
   return ss.getSheetByName(name) || ss.insertSheet(name);

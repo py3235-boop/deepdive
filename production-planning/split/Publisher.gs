@@ -18,8 +18,10 @@
 
 /* 색상 (연한 톤) */
 const COLOR_ = {
-  OFF: '#f4cccc',      // 주말·휴무 열, 음수 재고
-  CHANGE: '#fff2cc',   // 교체=Y 행
+  OFF: '#f3f3f3',      // 주말·휴무 열 — 연한 회색. 빨강이면 신규/변경 주황이 묻혀 눈에 안 띈다 (사용자 지시 2026-09-04)
+  RISK: '#f4cccc',     // 음수 재고(납기위험) — 여기만 연빨강으로 남긴다
+  NEW_FONT: '#1155cc', // 신규/변경 글자색 — 주황 배경 위에서 바뀐 값이 바로 눈에 들게 (사용자 지시 2026-09-04)
+  CHANGE: '#d9ead3',   // 교체=Y 행 — 연한 녹색 3 (사용자 지시 2026-09-04)
   NEW: '#fce5cd',      // 상태 신규/변경
   DONE: '#efefef',     // 상태 확정/완료
   HEAD: '#d9d9d9',     // 헤더
@@ -118,7 +120,13 @@ function writeJobsTab_(rs, jobs) {
   sh.clear();
   const n = rows.length;
   if (n) {
-    sh.getRange(2, 4, n, 1).setNumberFormat('@');
+    /* 문자열 열은 반드시 텍스트 서식으로 — 안 그러면 시트가 값을 바꿔버린다.
+     * 특히 청크(`1/2`·`2/3`)는 일반 서식이면 **날짜로 자동 변환**된다(1/2 → 1월 2일).
+     * 그러면 다음 실행에서 읽어온 청크가 원래 값과 달라 판정 키가 어긋나고,
+     * 바뀐 게 없는데도 그 작업들이 계속 `신규`로 잡힌다. (사용자 지적 2026-09-04) */
+    sh.getRange(2, 1, n, 2).setNumberFormat('@');    // 계획ID · 호기
+    sh.getRange(2, 4, n, 3).setNumberFormat('@');    // 품목코드 · 규격 · 고객사
+    sh.getRange(2, 12, n, 3).setNumberFormat('@');   // 교체 · 청크 · 상태
     sh.getRange(2, 7, n, 1).setNumberFormat('yyyy-mm-dd');
     sh.getRange(2, 8, n, 2).setNumberFormat('yyyy-mm-dd hh:mm');
     sh.getRange(2, 10, n, 1).setNumberFormat('0.00');
@@ -317,6 +325,8 @@ function renderIntegrated_(rs, jobRows, daily, data, month) {
   const values = [FIXED.concat(month.labels)];
   const formats = [new Array(ncol).fill('@')];
   const bg = [month.off.map(o => o ? COLOR_.OFF : null)];
+  /* 글자색 배열 — setFontColors는 배경 배열과 크기가 정확히 같아야 한다 (헤더 행은 기본색) */
+  const fc = [new Array(ncol).fill(null)];
   bg[0] = new Array(FIXED.length).fill(COLOR_.HEAD).concat(bg[0].map(c => c || COLOR_.HEAD));
   const rowTypes = [['생산량(KG)', '#,##0'], ['조장(m)', '#,##0'], ['생산시간(Hr)', '0.0']];
 
@@ -342,6 +352,8 @@ function renderIntegrated_(rs, jobRows, daily, data, month) {
       values.push(row);
       formats.push(['@', '@', '@', '#,##0', '@', rt[1]].concat(new Array(nd).fill(rt[1])));
       bg.push([null, null, null, null, null, null].concat(month.keys.map(k => month.off[colOf[k] - FIXED.length] ? COLOR_.OFF : (hiCells[b.key + '|' + k] ? COLOR_.NEW : null))));
+      /* 바뀐 셀은 글자도 파랑 — 주말이 회색이라 배경만으로는 덜 도드라진다 */
+      fc.push([null, null, null, null, null, null].concat(month.keys.map(k => (!month.off[colOf[k] - FIXED.length] && hiCells[b.key + '|' + k]) ? COLOR_.NEW_FONT : null)));
     });
   });
 
@@ -350,6 +362,7 @@ function renderIntegrated_(rs, jobRows, daily, data, month) {
   rng.setNumberFormats(formats);
   rng.setValues(values);
   rng.setBackgrounds(bg);
+  rng.setFontColors(fc);
   rng.setHorizontalAlignment('center');
   sh.getRange(1, 1, 1, ncol).setFontWeight('bold').setBorder(true, true, true, true, true, true);
   // 블록 박스 · 고정열 세로선 · 합계열 굵은 오른선
@@ -370,7 +383,7 @@ function renderIntegrated_(rs, jobRows, daily, data, month) {
  *  opts.horizonDays 가 있으면 오늘~D+(n-1) 작업만 (현장 배포용, 대회 중엔 미사용)
  * ──────────────────────────────────────────────────────────────────────────── */
 /* 현장 작업지시서 컬럼 — 고객사·청크는 현장에서 쓰지 않아 뺐다(사용자 지시).
- * 교체는 앞 작업과 규격이 달라 교체가 필요한지를 현장이 바로 봐야 해서 열로 둔다(행 노란색과 함께).
+ * 교체는 앞 작업과 규격이 달라 교체가 필요한지를 현장이 바로 봐야 해서 열로 둔다(행 연한 녹색과 함께).
  * 청크 분할은 같은 품목이 연달아 나오는 것으로 알 수 있고, 고객사·청크 값은 [작업목록] 탭에 남아 있다. */
 const MACHINE_TAB_COLS_ = ['순번', '품목코드', '규격', '생산량(kg)', '조장(m)', '보빈수', '예상 종료시간', '소요시간(h)', '출하일', '교체', '상태'];
 
@@ -408,13 +421,17 @@ function writeMachineOrder_(sh, machine, mj, data, planId, updated) {
     return new Array(ncol).fill(c);
   }));
   body.setBackgrounds(bg);
+  /* 신규·변경 행은 글자도 파랑 — 현장이 '이번에 바뀐 작업'을 한눈에 찾게 */
+  const fc = [new Array(ncol).fill(null)].concat(mj.map(j =>
+    new Array(ncol).fill((j.상태 === '신규' || j.상태 === '변경') ? COLOR_.NEW_FONT : null)));
+  body.setFontColors(fc);
   body.setHorizontalAlignment('center').setBorder(true, true, true, true, true, true);
   sh.getRange(3, 1, 1, ncol).setFontWeight('bold');
   /* 현장 오독 방지(제조현장 검토 반영) */
   sh.getRange(3, 8).setNote(`소요시간(h) = 생산량 ÷ kg/hr (+규격교체 ${CFG.PLAN.CHANGE_HOURS}h). 계획 첫날 첫 작업의 가동준비 ${CFG.PLAN.INITIAL_READY_HOURS}h는 여기 포함되지 않고 예상 종료시간에 반영됩니다. 순번대로 이어서 작업하세요.`);
   sh.getRange(3, 7).setNote('계획 작업의 예상 종료 시각입니다. 상태가 `완료`인 회색 행은 이미 만든 실적 기록이라 이 시각이 실제 종료 시각과 다를 수 있습니다.');
-  sh.getRange(3, 10).setNote(`Y면 앞 작업과 규격이 달라 규격교체가 필요합니다. 교체 시간 ${CFG.PLAN.CHANGE_HOURS}h는 소요시간과 예상 종료시간에 이미 들어 있습니다. 이 행은 노란색으로 표시됩니다.`);
-  sh.getRange(3, 11).setNote('계획: 이번에 세운 계획 · 신규: 이전 계획에 없던 작업 · 변경: 시각이나 수량이 달라진 작업 · 확정: 기준일 전 시작해 그대로 두는 작업 · 완료: 실적으로 대체된 작업\n\n행 색: 노란색 = 규격교체 필요 · 주황색 = 신규·변경 · 회색 = 확정·완료');
+  sh.getRange(3, 10).setNote(`Y면 앞 작업과 규격이 달라 규격교체가 필요합니다. 교체 시간 ${CFG.PLAN.CHANGE_HOURS}h는 소요시간과 예상 종료시간에 이미 들어 있습니다. 이 행은 연한 녹색으로 표시됩니다.`);
+  sh.getRange(3, 11).setNote('계획: 이번에 세운 계획 · 신규: 이전 계획에 없던 작업 · 변경: 시각이나 수량이 달라진 작업 · 확정: 기준일 전 시작해 그대로 두는 작업 · 완료: 실적으로 대체된 작업\n\n행 색: 연한 녹색 = 규격교체 필요 · 주황색(파란 글자) = 신규·변경 · 회색 = 확정·완료');
   sh.setFrozenRows(3);
   sh.setColumnWidth(7, 130); sh.setColumnWidth(10, 50); sh.setColumnWidth(11, 70);
   return { count: mj.length, kg, changeovers: chg };
@@ -548,10 +565,11 @@ function renderInventory_(rs, jobRows, daily, data, month, opts) {
         Math.round(cells.reduce((s, v) => s + v, 0))].concat(cells));
       bg.push([null, null, null, null].concat(offBg));
     });
-    /* 재고 행 — 합계 열에는 월말 재고를 쓰고, 음수(납기위험)는 연빨강 */
+    /* 재고 행 — 합계 열에는 월말 재고를 쓰고, 음수(납기위험)는 연빨강.
+     * 주말 열은 연한 회색이므로 빨강이 납기위험 신호로만 남는다. */
     values.push(['', '', '재고', stockCells[stockCells.length - 1]].concat(stockCells));
-    bg.push([null, null, null, stockCells[stockCells.length - 1] < 0 ? COLOR_.OFF : null]
-      .concat(stockCells.map((v, i) => v < 0 ? COLOR_.OFF : offBg[i])));
+    bg.push([null, null, null, stockCells[stockCells.length - 1] < 0 ? COLOR_.RISK : null]
+      .concat(stockCells.map((v, i) => v < 0 ? COLOR_.RISK : offBg[i])));
   });
 
   values.push(['', '', '일일 생산 합계', Math.round(dailyProd.reduce((s, v) => s + v, 0))].concat(dailyProd.map(v => Math.round(v))));
