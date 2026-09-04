@@ -9,8 +9,8 @@ Google Apps Script 시스템. **스프레드시트에 바인딩된 Apps Script �
 ## 절대 규칙
 
 **1. clasp 명령에는 항상 `--user company` 를 붙인다.**
-`~/.clasprc.json` 에 슬롯이 셋(`company` = py3235@s-cable.co.kr, `personal`, `default`)이라
-생략하면 어디로 갈지 모른다.
+`~/.clasprc.json` 에 슬롯이 여러 개라 생략하면 어디로 갈지 모른다.
+회사 계정은 `company` 슬롯에 있다.
 
 **2. `clasp logout` 을 절대 실행하지 않는다.** 사용자가 명시적으로 요청했다.
 
