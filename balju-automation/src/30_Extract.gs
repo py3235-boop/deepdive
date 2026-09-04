@@ -23,12 +23,29 @@ const 형식표 = {
 /** 한글 파일은 Drive 가 변환하지 못한다. 명시적으로 거른다. */
 const 미지원표 = { hwp: '한글(.hwp)', hwpx: '한글(.hwpx)' };
 
+/** 파일명에서 확장자를 소문자로 뽑는다. 없으면 빈 문자열 */
+function 확장자(파일명) {
+  const s = String(파일명 || '');
+  return s.indexOf('.') >= 0 ? s.split('.').pop().toLowerCase() : '';
+}
+
+/** 이 확장자를 추출할 수 있는가 */
+function 지원형식인가(파일명) {
+  return !!형식표[확장자(파일명)];
+}
+
+/** 명시적으로 지원하지 않는다고 표시한 형식인가 (한글 파일 등) */
+function 미지원형식이름(파일명) {
+  return 미지원표[확장자(파일명)] || null;
+}
+
 /** 추출 결과의 빈 껍데기 */
 function _추출결과(형식, 메타) {
   return {
     성공: false,
     형식: 형식 || '?',
     표들: [],      // string[][][]  — 표 단위. 진짜 표가 있을 때만 채워진다
+    표배경들: [],  // string[][][]  — 표들과 같은 모양의 배경색. 메일 HTML 표에서만 채워진다
     줄들: [],      // string[]      — 텍스트 줄
     원문: '',
     메타:메타 || {},
@@ -61,20 +78,18 @@ function 추출(입력) {
     return r;
   }
 
-  const 확장자 = 파일명.indexOf('.') >= 0
-    ? 파일명.split('.').pop().toLowerCase()
-    : '';
+  const 확장 = 확장자(파일명);
 
-  if (미지원표[확장자]) {
-    const r = _추출결과(확장자, 메타);
-    r.메타.실패사유 = 미지원표[확장자] + ' 은 지원하지 않습니다 (Drive 가 변환하지 못함)';
+  if (미지원표[확장]) {
+    const r = _추출결과(확장, 메타);
+    r.메타.실패사유 = 미지원표[확장] + ' 은 지원하지 않습니다 (Drive 가 변환하지 못함)';
     return r;
   }
 
-  const 형식 = 형식표[확장자];
+  const 형식 = 형식표[확장];
   if (!형식) {
-    const r = _추출결과(확장자 || '?', 메타);
-    r.메타.실패사유 = '지원하지 않는 확장자: ' + (확장자 || '(없음)');
+    const r = _추출결과(확장 || '?', 메타);
+    r.메타.실패사유 = '지원하지 않는 확장자: ' + (확장 || '(없음)');
     return r;
   }
 
@@ -295,8 +310,11 @@ function _추출_html(html, 메타) {
   const 표정규식 = /<table[^>]*>([\s\S]*?)<\/table>/gi;
   let m;
   while ((m = 표정규식.exec(원본)) !== null) {
-    const 표 = _html표파싱(m[1]);
-    if (표.length) 결과.표들.push(표);
+    const 파싱 = _html표파싱(m[1]);
+    if (파싱.값들.length) {
+      결과.표들.push(파싱.값들);
+      결과.표배경들.push(파싱.배경들);
+    }
   }
 
   결과.원문 = _html에서텍스트(원본);
@@ -309,21 +327,80 @@ function _추출_html(html, 메타) {
   return 결과;
 }
 
-/** <tr>/<td> 를 훑어 2차원 배열로. 중첩 <table> 안쪽은 셀 텍스트로 눌러 담는다. */
+/**
+ * <tr>/<td> 를 훑어 2차원 배열로. 중첩 <table> 안쪽은 셀 텍스트로 눌러 담는다.
+ *
+ * **셀 배경색도 같이 뽑는다** — 원본 탭에서 메일 표의 모양을 그대로 재현하기 위해서다.
+ * 셀에 색이 없으면 그 행(<tr>)의 색을 물려받는다.
+ *
+ * @return {{값들: string[][], 배경들: string[][]}}
+ */
 function _html표파싱(내부) {
-  const 행들 = [];
-  const 행정규식 = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  const 값들 = [];
+  const 배경들 = [];
+
+  const 행정규식 = /<tr([^>]*)>([\s\S]*?)<\/tr>/gi;
   let mr;
   while ((mr = 행정규식.exec(내부)) !== null) {
-    const 셀들 = [];
-    const 셀정규식 = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    const 행배경 = _배경색뽑기(mr[1]);
+    const 셀값 = [];
+    const 셀배경 = [];
+
+    // 여는 태그와 닫는 태그를 역참조로 맞춰 td/th 가 섞여도 어긋나지 않게 한다
+    const 셀정규식 = /<(t[dh])([^>]*)>([\s\S]*?)<\/t[dh]>/gi;
     let mc;
-    while ((mc = 셀정규식.exec(mr[1])) !== null) {
-      셀들.push(_html에서텍스트(mc[1]).replace(/\s+/g, ' ').trim());
+    while ((mc = 셀정규식.exec(mr[2])) !== null) {
+      셀값.push(_html에서텍스트(mc[3]).replace(/\s+/g, ' ').trim());
+      셀배경.push(_배경색뽑기(mc[2]) || 행배경 || '');
     }
-    if (셀들.length) 행들.push(셀들);
+
+    if (셀값.length) {
+      값들.push(셀값);
+      배경들.push(셀배경);
+    }
   }
-  return 행들;
+  return { 값들: 값들, 배경들: 배경들 };
+}
+
+/** 태그 속성에서 배경색을 뽑는다. `bgcolor=` 와 `style="background(-color):"` 둘 다 본다. */
+function _배경색뽑기(속성) {
+  const s = String(속성 || '');
+
+  let m = s.match(/bgcolor\s*=\s*["']?([^"'\s>]+)/i);
+  if (m) {
+    const c = _색값정규화(m[1]);
+    if (c) return c;
+  }
+
+  m = s.match(/background(?:-color)?\s*:\s*([^;"']+)/i);
+  if (m) {
+    const c = _색값정규화(m[1]);
+    if (c) return c;
+  }
+
+  return '';
+}
+
+/**
+ * CSS 색값을 스프레드시트가 받는 형태로 바꾼다.
+ * `rgb(...)` 는 setBackground 가 못 받으므로 16진수로 변환한다.
+ */
+function _색값정규화(값) {
+  const s = String(값 || '').trim().toLowerCase();
+  if (!s || s === 'transparent' || s === 'none' || s === 'inherit' || s === 'initial') return '';
+
+  const rgb = s.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+  if (rgb) {
+    return '#' + [rgb[1], rgb[2], rgb[3]].map(function (n) {
+      const v = Math.max(0, Math.min(255, parseInt(n, 10)));
+      return ('0' + v.toString(16)).slice(-2);
+    }).join('');
+  }
+
+  if (/^#[0-9a-f]{3}$/.test(s)) return '#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+  if (/^#[0-9a-f]{6}$/.test(s)) return s;
+  if (/^[a-z]+$/.test(s)) return s;   // red, gray 같은 색 이름은 스프레드시트가 받는다
+  return '';
 }
 
 /** 태그를 벗기고 엔티티를 풀어 텍스트로. <br>/</tr>/</p> 는 줄바꿈으로 바꾼다. */

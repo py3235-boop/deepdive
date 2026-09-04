@@ -25,6 +25,9 @@ function onOpen() {
     )
     .addSeparator()
     .addItem('미분류 목록 보기', '미분류_목록_메뉴')
+    .addItem('알림 설정 (Google Chat 웹훅)', '알림_웹훅설정_메뉴')
+    .addItem('알림 테스트', '알림_테스트_메뉴')
+    .addItem('관리 시트 서식 정리', '관리시트_서식_메뉴')
     .addItem('산출물 초기화', '산출물_초기화_메뉴')
     .addToUi();
 }
@@ -42,6 +45,12 @@ function 설치() {
   결과.push(...탭_준비());
   결과.push(미분류폴더_준비());
   결과.push(고객사식별_초기화());
+
+  try {
+    결과.push(관리시트_서식());
+  } catch (e) {
+    결과.push('관리 시트 서식 실패(무시): ' + e);
+  }
 
   const 요약 = 결과.join('\n');
   Logger.log(요약);
@@ -143,4 +152,67 @@ function 고객사식별_초기화() {
 
   sheet.getRange(2, 1, rows.length, 4).setValues(rows);
   return '고객사식별 초기 규칙 ' + rows.length + '행 입력';
+}
+
+// ─────────────────────────────────────────────────────────────
+// 관리 시트 서식
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 관리 시트 네 탭의 서식을 맞춘다.
+ *
+ * 로그가 쌓이면 열 폭이 다시 좁아 보이므로 **실행할 때마다 다시 적용한다.**
+ * 실패해도 조용히 넘어간다 — 서식 때문에 발주서 처리가 멈추면 안 된다.
+ */
+function 관리시트_서식() {
+  const ss = 관리시트();
+  const 로그 = [];
+
+  // ── 설정 · 고객사식별 : 가운데 정렬 ──
+  [탭.설정, 탭.고객사식별].forEach(function (이름) {
+    const sheet = ss.getSheetByName(이름);
+    if (!sheet || sheet.getLastRow() === 0) return;
+
+    const 범위 = sheet.getDataRange();
+    범위.setHorizontalAlignment('center').setVerticalAlignment('middle');
+
+    sheet.getRange(1, 1, 1, sheet.getLastColumn()).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+
+    // 설정 탭의 웹훅 URL 처럼 아주 긴 값이 있어 상한을 넉넉히 둔다
+    _열폭맞추기(sheet, 1, sheet.getLastColumn(), 90, 420);
+    로그.push(이름 + ' 서식 적용');
+  });
+
+  // ── 처리로그 · 미매핑 : 글자가 가려지지 않게 열 폭 ──
+  [탭.처리로그, 탭.미매핑].forEach(function (이름) {
+    const sheet = ss.getSheetByName(이름);
+    if (!sheet || sheet.getLastRow() === 0) return;
+
+    sheet.getRange(1, 1, 1, sheet.getLastColumn()).setFontWeight('bold');
+    sheet.setFrozenRows(1);
+
+    // 일시 열은 `2026. 9. 4 오전 1:10:20` 처럼 길어져 잘린다. 형식을 줄이고 폭을 고정한다
+    if (sheet.getLastRow() > 1) {
+      sheet.getRange(2, 1, sheet.getLastRow() - 1, 1)
+        .setNumberFormat('yyyy-mm-dd hh:mm:ss');
+    }
+
+    // 사유·원본행에는 긴 글이 들어간다. 줄바꿈을 끄고 상한을 두되 넉넉하게
+    sheet.getDataRange().setWrap(false).setVerticalAlignment('middle');
+    _열폭맞추기(sheet, 1, sheet.getLastColumn(), 80, 460);
+    sheet.setColumnWidth(1, 150);   // 일시는 고정 폭이면 충분하다
+
+    로그.push(이름 + ' 열 폭 조정');
+  });
+
+  const 요약 = 로그.join('\n');
+  Logger.log(요약);
+  return 요약;
+}
+
+/** 시트 메뉴용 래퍼 */
+function 관리시트_서식_메뉴() {
+  const ui = SpreadsheetApp.getUi();
+  ui.alert('관리 시트 서식', 관리시트_서식() || '적용할 탭이 없습니다.', ui.ButtonSet.OK);
 }

@@ -134,18 +134,34 @@ function _파싱_A_표(표, out) {
 
   const 블록합계 = [];
   let 현재블록 = { 수량: 0, 중량: 0, 행수: 0 };
+  let 마지막일자 = '';
+  let 블록번호 = 1;
 
   표.데이터.forEach(function (행) {
     // 합계 행인가 — 어느 칸에든 `합계`/`소계` 라벨이 있으면 그렇게 본다
     const 합계칸 = 행.filter(function (v) { return _합계라벨.test(v); });
     if (합계칸.length) {
       const 숫자들 = _줄에서숫자들(행.join(' '));
-      블록합계.push({
-        수량: 숫자들.length > 0 ? 숫자들[0] : null,
-        중량: 숫자들.length > 1 ? 숫자들[1] : null,
-        누적: 현재블록,
+      const 수량합 = 숫자들.length > 0 ? 숫자들[0] : null;
+      const 중량합 = 숫자들.length > 1 ? 숫자들[1] : null;
+
+      블록합계.push({ 수량: 수량합, 중량: 중량합, 누적: 현재블록 });
+
+      // **합계 행도 데이터에 넣는다.** 원본 발주서의 순서를 그대로 살리기 위해
+      // 데이터 행들 바로 뒤에 온다. 일자는 그 블록의 납기일을 물려받아
+      // 월 판정과 대체 판정이 블록별로 정확히 되게 한다.
+      out.행들.push({
+        합계행: true,
+        블록: 블록번호,
+        발주코드: 합계칸[0].replace(/\s+/g, ''),   // `합 계` → `합계`
+        품명: '',
+        수량: 수량합,
+        중량: 중량합,
+        일자: 마지막일자,
       });
+
       현재블록 = { 수량: 0, 중량: 0, 행수: 0 };
+      블록번호++;
       return;
     }
 
@@ -155,13 +171,16 @@ function _파싱_A_표(표, out) {
 
     const 수량 = idx.수량 >= 0 ? 숫자파싱(행[idx.수량]) : null;
     const 중량 = idx.중량 >= 0 ? 숫자파싱(행[idx.중량]) : null;
+    const 일자 = idx.일자 >= 0 ? String(행[idx.일자] || '').trim() : '';
+    if (일자) 마지막일자 = 일자;
 
     out.행들.push({
+      블록: 블록번호,
       발주코드: 발주코드 || 코드,
       품명: idx.품명 >= 0 ? 행[idx.품명] : '',
       수량: 수량,
       중량: 중량,
-      일자: idx.일자 >= 0 ? String(행[idx.일자] || '').trim() : '',
+      일자: 일자,
     });
 
     if (수량) 현재블록.수량 += 수량;
@@ -243,9 +262,17 @@ function _파싱_B_표(표, out) {
   if (i중량 < 0) i중량 = _열찾기(헤더, '딥다이브');
 
   표.데이터.forEach(function (행) {
-    if (행.some(function (v) { return _합계라벨.test(v); })) {
+    const 합계칸 = 행.filter(function (v) { return _합계라벨.test(v); });
+    if (합계칸.length) {
       const 숫자들 = _줄에서숫자들(행.join(' '));
       if (숫자들.length) out.합계.소계 = 숫자들[숫자들.length - 1];
+      // 원본의 소계 행도 데이터에 넣는다 (순서 유지)
+      out.행들.push({
+        합계행: true,
+        품명: 합계칸[0].replace(/\s+/g, ''),
+        규격: '',
+        중량: 숫자들.length ? 숫자들[숫자들.length - 1] : null,
+      });
       return;
     }
     const 규격 = i규격 >= 0 ? 행[i규격] : '';
@@ -291,6 +318,16 @@ function _파싱_B_줄(줄들, out) {
         const n = _줄에서숫자들(줄[i]);
         if (n.length) out.합계.소계 = n[n.length - 1];
       }
+
+      // 원본의 소계 행도 데이터에 넣는다. 데이터 행 뒤에 오도록 맨 끝에 붙인다
+      if (out.합계.소계 !== undefined) {
+        out.행들.push({
+          합계행: true,
+          품명: 줄[i].replace(/\s+/g, ''),
+          규격: '',
+          중량: out.합계.소계,
+        });
+      }
       break;
     }
   }
@@ -323,7 +360,24 @@ function _파싱_C(추출결과, 규칙) {
     _파싱_C_줄(추출결과.줄들, out, 규칙);
   }
 
-  if (!out.행들.length) out.경고.push('고객사C 데이터 행을 찾지 못했습니다');
+  if (!out.행들.length) {
+    out.경고.push('고객사C 데이터 행을 찾지 못했습니다');
+    return out;
+  }
+
+  // 고객사C 발주서에는 합계 행이 없다. 다른 고객사와 표 모양을 맞추기 위해 **계산해서** 붙인다.
+  // 원본에 없던 값이므로 검산에는 쓰지 않는다 (검산 기준값이 아니라 파생값이다).
+  const 수량합 = out.행들.reduce(function (a, r) { return a + (숫자파싱(r.수량) || 0); }, 0);
+  const 중량합 = out.행들.reduce(function (a, r) { return a + (숫자파싱(r.중량) || 0); }, 0);
+  out.행들.push({
+    합계행: true,
+    계산됨: true,
+    제품명: '합계',
+    규격: '',
+    수량: 수량합 || null,
+    중량: 중량합 || null,
+  });
+
   return out;
 }
 
