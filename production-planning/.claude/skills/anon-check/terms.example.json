@@ -1,0 +1,11 @@
+{
+  "_설명": "anon_check.py가 읽는 금지어 목록의 형식. 이 파일을 terms.local.json 으로 복사한 뒤 값을 채운다. terms.local.json 은 저장소에 올리지 않는다.",
+  "terms": [
+    "실제고객사명1",
+    "실제고객사명2",
+    "실제공정명1",
+    "실제품목코드1",
+    "회사도메인"
+  ],
+  "email_domain_regex": "example\\.co\\.kr"
+}

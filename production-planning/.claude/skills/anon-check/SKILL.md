@@ -33,3 +33,18 @@ python .claude/skills/anon-check/anon_check.py
 
 ## 금지어 추가
 스크립트 상단 `TERMS` 리스트에 문자열을 추가한다. 실명·회사명은 이 파일과 스크립트 외에는 어디에도 적지 않는다.
+
+## 금지어 목록은 저장소에 없습니다
+
+검사할 단어 목록(실제 고객사명·공정명·품목코드·회사 도메인)은 그 자체가 보호 대상이라
+`anon_check.py` 안에 두지 않고 같은 폴더의 `terms.local.json` 에서 읽습니다.
+이 파일은 `.gitignore` 로 제외되어 저장소에 올라가지 않습니다.
+
+새 환경에서 처음 쓸 때:
+
+```
+cp .claude/skills/anon-check/terms.example.json .claude/skills/anon-check/terms.local.json
+```
+
+복사한 뒤 실제 값을 채우면 됩니다. 목록 파일이 없으면 검사기는 **통과로 처리하지 않고 멈춥니다** —
+목록 없이 "위반 0건"을 내면 검사했다는 착각만 남기 때문입니다.

@@ -112,6 +112,9 @@ function dateKey_(d) { return Utilities.formatDate(d, CFG.TZ, 'yyyy-MM-dd'); }
 /** Date → 임의 패턴 (스크립트 타임존). 예: fmtDate_(d, 'yyMMdd-HHmm') = 계획ID */
 function fmtDate_(d, pattern) { return Utilities.formatDate(d, CFG.TZ, pattern); }
 
+/** 'yyyy-MM' — 출고계획이 담당하는 달을 가리키는 키 */
+function monthKey_(d) { return fmtDate_(d, 'yyyy-MM'); }
+
 /** 모든 셀이 빈 행인지 (xlsx→Sheets 변환 탭의 빈 패딩 행 판별) */
 function isBlankRow_(row) {
   for (let i = 0; i < row.length; i++) {
@@ -302,7 +305,7 @@ function openWorkOrderFolder_() {
 }
 
 /**
- * 호기별 작업지시 스프레드시트 — `집합01호기 작업지시` 처럼 호기마다 파일 하나.
+ * 호기별 작업지시 스프레드시트 — `집합01호기 작업지시서` 처럼 호기마다 파일 하나.
  * ID를 스크립트 속성(WORKORDER_SS_JSON)에 호기별로 저장해 계속 재사용한다 — 현장에 뿌린 링크·QR이 바뀌면 안 된다.
  * 파일이 휴지통에 있으면 복원해 쓰고, Drive에서 사라졌을 때만 새로 만든다.
  */
@@ -313,7 +316,15 @@ function openWorkOrderSs_(machine) {
     const status = checkDriveItem_(saved, 'file');
     if (status === 'ok' || status === 'restored') {
       if (status === 'restored') warn_('작업지시서', `${machine} 파일이 휴지통에 있어 복원했습니다`);
-      return SpreadsheetApp.openById(saved);
+      const ss = SpreadsheetApp.openById(saved);
+      /* 파일명이 규칙과 다르면 맞춘다 — 접미사를 바꿨거나 사람이 이름을 고친 경우.
+       * 파일 ID는 그대로이므로 현장에 뿌린 링크·QR은 계속 살아 있다. */
+      const want = machine + CFG.FILE_NAMES.WORKORDER_SUFFIX;
+      if (ss.getName() !== want) {
+        ss.rename(want);
+        Logger.log(`[작업지시서] ${machine} 파일명 정정 → ${want}`);
+      }
+      return ss;
     }
     warn_('작업지시서', `${machine} 파일(${saved})을 Drive에서 찾을 수 없어 새로 만듭니다 — 현장에 뿌린 이전 링크는 열리지 않습니다`);
   }
@@ -337,6 +348,26 @@ function workOrderLinks_() {
     }
     return { machine: m, url };
   });
+}
+
+/**
+ * `출고계획/` 폴더에서 원본과 같은 이름의 사본을 찾는다 (확장자는 떼고 비교).
+ * 동기화 이력이 없어졌을 때 사본을 새로 만들지 않고 이어 쓰기 위한 안전장치다 —
+ * 이게 없으면 같은 원본의 사본이 폴더에 여러 개로 쌓인다.
+ * @returns {File|null} 휴지통에 없는 사본 1개 (여러 개면 가장 최근 수정본)
+ */
+function findExistingCopy_(folder, srcName) {
+  const want = String(srcName).replace(/\.xlsx?$/i, '');
+  const hits = [];
+  const it = folder.getFiles();
+  while (it.hasNext()) {
+    const file = it.next();
+    if (file.isTrashed()) continue;
+    if (file.getName().replace(/\.xlsx?$/i, '') === want) hits.push(file);
+  }
+  if (!hits.length) return null;
+  hits.sort((a, b) => b.getLastUpdated().getTime() - a.getLastUpdated().getTime());
+  return hits[0];
 }
 
 /** 탭이 없으면 만들고 있으면 그대로 반환 (결과 파일 탭 보장용) */
@@ -405,9 +436,31 @@ function findFilesByPattern_(rootFolder, pattern) {
     .sort((a, b) => a.name.localeCompare(b.name, 'ko'));
 }
 
-/** 출고계획 파일 전부 (`X월_출고계획(통합)` 패턴, 폴더 무관, 이름순) */
+/**
+ * 출고계획 파일 **1개** (`X월_출고계획(통합)`·`출고계획` 패턴, 폴더 무관).
+ *
+ * 패턴에 맞는 파일이 여럿이면 **`X월_출고계획(통합)` 정식 이름 중 가장 최근 수정본 하나만** 쓴다.
+ * 여러 개를 합치면 같은 (품목코드, 고객사, 출하일)이 겹칠 때 어느 쪽이 이길지 Drive 탐색 순서에
+ * 좌우돼 출하계획 합계가 실행마다 달라진다. 나머지 파일은 경고로 남겨 사용자가 정리하게 한다.
+ *
+ * @returns {Array} 파일 0개 또는 1개 (호출부가 배열을 기대하므로 배열로 돌려준다)
+ */
 function findOrderFiles_() {
-  return findFilesByPattern_(getOrderRootFolder_(), CFG.ORDER_FILE_PATTERN);
+  const list = findFilesByPattern_(getOrderRootFolder_(), CFG.ORDER_FILE_PATTERN);
+  if (list.length <= 1) return list;
+
+  /* 2개 이상이면 ① `X월_출고계획(통합)` 정식 이름을 먼저 추리고 ② 그중 가장 최근 수정본을 쓴다.
+   * 정식 이름이 하나도 없을 때만 나머지(예: 옛 이름으로 남은 동기화 사본)에서 최신본을 고른다. */
+  const preferred = list.filter(f => CFG.ORDER_FILE_PATTERN_MAIN.test(f.name));
+  const pool = (preferred.length ? preferred : list).slice();
+  pool.sort((a, b) => b.lastUpdated.getTime() - a.lastUpdated.getTime());
+  const used = pool[0];
+
+  const rest = list.filter(f => f.id !== used.id).map(f => `${f.folderPath}/${f.name}`).join(' · ');
+  warn_('탐색', `출고계획 파일이 ${list.length}개 발견됐습니다 — 하나만 씁니다`
+    + `(${preferred.length ? '정식 이름 중 최신본' : '정식 이름이 없어 최신본'}). `
+    + `사용: ${used.folderPath}/${used.name} (${fmtDate_(used.lastUpdated, 'yyyy-MM-dd HH:mm')}) / 무시: ${rest}`);
+  return [used];
 }
 
 /**

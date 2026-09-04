@@ -383,7 +383,7 @@ function writeMachineOrder_(sh, machine, mj, data, planId, updated) {
   sh.clear();
   const kg = mj.reduce((s, j) => s + j['생산량(kg)'], 0);
   const chg = mj.filter(j => j.교체 === 'Y').length;
-  const head = [[`${machine} 작업지시${mj.length ? '' : ' — 이번 달 배정 없음'}`, `계획ID ${planId}`, `갱신 ${updated}`,
+  const head = [[`${machine} 작업지시서${mj.length ? '' : ' — 이번 달 배정 없음'}`, `계획ID ${planId}`, `갱신 ${updated}`,
     `이번 달 작업 ${mj.length}건 · 총 ${Math.round(kg).toLocaleString()}kg · 교체 ${chg}회`]];
   sh.getRange(1, 1, 1, 4).setValues(head).setFontWeight('bold');
   const rows = mj.map(j => {

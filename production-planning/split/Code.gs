@@ -50,6 +50,9 @@ const CFG = {
    *   ② `출고계획`             — 판독 파트 산출물의 실제 파일명(정확히 일치할 때만.
    *                              `출고계획_발주스냅샷` 같은 부수 파일은 걸리지 않는다) */
   ORDER_FILE_PATTERN: /^(\d{1,2}월[ _]?출고계획\(통합\)|출고계획(\.xlsx?)?$)/,
+  /* 정식 이름 — 후보가 여럿일 때 이 패턴에 맞는 파일을 먼저 고른다 (사용자 지시 2026-09-04).
+   * 동기화 사본이 옛 이름(`출고계획`)으로 남아 있어도 정식 이름 파일이 있으면 그쪽을 쓴다. */
+  ORDER_FILE_PATTERN_MAIN: /^\d{1,2}월[ _]?출고계획\(통합\)/,
   ACTUAL_PROD_PATTERN: /^생산실적/,                      // 실적 시스템이 매일 올리는 생산실적 (같은 패턴 여러 개면 최신 수정본)
   ACTUAL_SHIP_PATTERN: /^출하실적/,                      // 실적 시스템이 매일 올리는 출하실적
 
@@ -59,7 +62,7 @@ const CFG = {
     RESULT: '생산계획',          // 결과 파일 (고정 ID, 탭 내용만 덮어씀)
     BACKUP_FOLDER: '일별생산계획', // 실행마다 결과 사본 "YYMMDD-HHmm_생산계획"
     WORKORDER_FOLDER: '작업지시서', // 호기별 작업지시 파일 10개가 들어가는 폴더
-    WORKORDER_SUFFIX: ' 작업지시',  // 파일명 = 호기 + 이 접미사 (예: 집합01호기 작업지시)
+    WORKORDER_SUFFIX: ' 작업지시서', // 파일명 = 호기 + 이 접미사 (예: 집합01호기 작업지시서)
     ORDER_COPY_FOLDER: '출고계획', // (선택) 외부 소스 폴더 동기화 복사본 위치
   },
 
@@ -140,7 +143,7 @@ const SHEET = {
   MASTER_REQUIRED: ['CAPA', '집합설비현황', '안되는품목', '기초재고', '휴무'],
 
   /* 호기별 작업지시 파일의 탭 이름 (파일마다 이 탭 하나만 둔다) */
-  WORKORDER: '작업지시',
+  WORKORDER: '작업지시서',
 
   /* 출하계획 스프레드시트 (자동 생성, 별개 파일) */
   SHIP: '출하계획',
@@ -329,7 +332,7 @@ function testLoadOnly() {
 
   /* 2) 출고계획 파일 탐색 (파일명 패턴, 폴더 무관) */
   const orderFiles = findOrderFiles_();
-  log(`■ 출고계획 파일: ${orderFiles.length}개 발견 (패턴 ${CFG.ORDER_FILE_PATTERN})`);
+  log(`■ 출고계획 파일: ${orderFiles.length}개 사용 (패턴 ${CFG.ORDER_FILE_PATTERN} — 여러 개면 최신본 1개만)`);
   orderFiles.forEach(f => log(`  - ${f.name}  | 폴더: ${f.folderPath}  | ${shortMime_(f.mimeType)}  | 수정: ${fmtDate_(f.lastUpdated, 'yyyy-MM-dd HH:mm')}`));
   if (!orderFiles.length) warn_('testLoadOnly', '출고계획 파일을 찾지 못했습니다 — 프로젝트 루트 아래에 `X월_출고계획(통합)` 스프레드시트가 있어야 합니다');
 
@@ -401,17 +404,20 @@ function isCustomerHeader_(h) {
 
 /**
  * 출고계획 → 출하계획 변환 (변환 단계의 진입점. checkAndRunOnUpdate·runAll도 이것을 호출)
- * @param {{force?: boolean}} [opts] force=true면 처리이력을 무시하고 찾은 파일 전부를 다시 읽는다
+ * @param {{force?: boolean, label?: string}} [opts]
+ *   force=true면 처리이력을 무시하고 찾은 파일 전부를 다시 읽는다.
+ *   label은 알림에 붙일 실행 주체 표시 — 트리거가 돌린 것이면 runAll이 '🤖 [자동실행]'을 넘긴다.
+ *   비우면 사람이 직접 실행한 것으로 보고 '👤 [수동실행]'을 쓴다 (편집기·메뉴 실행).
  * @returns {{processed, skipped, added, updated, unchanged, meltedRows, shipRows, shipKg, shipUrl, sync, elapsedSec}}
  */
 function convertOrderToPlan(opts) {
   opts = opts || {};
   const t0 = Date.now();
-  const result = { processed: [], skipped: [], added: 0, updated: 0, unchanged: 0, meltedRows: 0, shipRows: 0, shipKg: 0, shipUrl: '', sync: null, elapsedSec: 0 };
+  const result = { processed: [], skipped: [], added: 0, updated: 0, removed: 0, removedKg: 0, unchanged: 0, meltedRows: 0, shipRows: 0, shipKg: 0, shipUrl: '', sync: null, elapsedSec: 0 };
   const finish = () => {
     result.elapsedSec = Math.round((Date.now() - t0) / 100) / 10;
     const shipPart = result.processed.length ? `출하계획 ${result.shipRows}행 ${Math.round(result.shipKg).toLocaleString()}kg` : '출하계획 변경 없음';
-    Logger.log(`[변환] 처리 ${result.processed.length}개 · 건너뜀 ${result.skipped.length}개 · 추가 ${result.added} · 갱신 ${result.updated} · 동일 ${result.unchanged} · ${shipPart} · ${result.elapsedSec}초`);
+    Logger.log(`[변환] 처리 ${result.processed.length}개 · 건너뜀 ${result.skipped.length}개 · 추가 ${result.added} · 변경 ${result.updated} · 삭제 ${result.removed} · 동일 ${result.unchanged} · ${shipPart} · ${result.elapsedSec}초`);
     return result;
   };
 
@@ -471,8 +477,13 @@ function convertOrderToPlan(opts) {
 
   /* 3) 출하계획 파일 upsert (없으면 이때 생성) */
   const ship = openShip_({ create: true });
-  const up = upsertShipRows_(ship, melted);
+  /* 이번에 읽은 출고계획이 담당하는 달 — 그 달 안에서 파일에 없는 행은 취소된 출고로 보고 지운다 */
+  const months = [];
+  melted.forEach(m => { const mk = monthKey_(m.출하일); if (months.indexOf(mk) < 0) months.push(mk); });
+  const up = upsertShipRows_(ship, melted, { authoritativeMonths: months });
   result.added = up.added; result.updated = up.updated; result.unchanged = up.unchanged;
+  result.removed = up.removed; result.removedKg = up.removedKg;
+  up.removedRows.forEach(r => Logger.log(`[변환] 삭제(출고계획에서 빠짐): ${r.품목코드} ${r.고객사} ${dateKey_(r.출하일)} ${Math.round(r.출하량).toLocaleString()}kg`));
   result.shipRows = up.total; result.shipKg = up.totalKg; result.shipUrl = ship.getUrl();
 
   /* 4) 처리이력·출하계획 해시 저장 — 같은 변경으로 트리거가 두 번 돌지 않게 */
@@ -485,12 +496,15 @@ function convertOrderToPlan(opts) {
 
   /* 5) 알림 */
   const msg = [
-    `출고계획 변환 완료 (${fmtDate_(new Date(), 'yyyy-MM-dd HH:mm')})`,
+    /* 첫 줄 ✅ — 채팅방에서 생산계획 생성 알림과 한눈에 구분되게 (사용자 지시 2026-09-04) */
+    `✅ 출고계획 변환 완료 (${fmtDate_(new Date(), 'yyyy-MM-dd HH:mm')})`,
     ...result.processed.map(p => `- ${p.folderPath}/${p.name}: ${p.rows}건 ${Math.round(p.kg).toLocaleString()}kg`),
-    `출하계획: 추가 ${result.added}건 · 갱신 ${result.updated}건 · 동일 ${result.unchanged}건 → 총 ${result.shipRows}행 ${Math.round(result.shipKg).toLocaleString()}kg`,
+    `출하계획: 추가 ${result.added}건 · 변경 ${result.updated}건 · 삭제 ${result.removed}건 · 동일 ${result.unchanged}건 → 총 ${result.shipRows}행 ${Math.round(result.shipKg).toLocaleString()}kg`,
     `출하계획 파일: ${result.shipUrl}`,
   ].join('\n');
-  notify_(msg, '👤 [수동실행]');
+  /* 실행 주체 표시 — 트리거로 돌아온 변환은 자동, 사람이 직접 실행한 것은 수동.
+   * runAll이 감지 사유로 판단한 라벨을 넘겨준다 (사용자 지시 2026-09-04). */
+  notify_(msg, opts.label || '👤 [수동실행]');
   return finish();
 }
 
@@ -637,22 +651,51 @@ function sortShipRows_(a, b) {
 
 /**
  * [출하계획] 탭에 (품목코드, 고객사, 출하일) 키로 upsert하고 정렬해 탭 전체를 다시 쓴다.
- *  같은 키 → 출하량 덮어쓰기(값이 같으면 '동일'), 새 키 → 추가. 기존에만 있는 키는 그대로 둔다(삭제하지 않음).
+ *  같은 키 → 출하량 덮어쓰기(값이 같으면 '동일'), 새 키 → 추가.
+ *
+ * opts.authoritativeMonths: ['2026-09', …]
+ *  출고계획 파일은 그 달 전체를 담은 계획표이므로, **그 달에 관해서는 파일이 유일한 근거**다.
+ *  파일에서 빠진 (품목·고객사·출하일)은 출고가 취소·이동된 것이므로 출하계획에서도 지운다.
+ *  지우지 않으면 취소된 출고가 계속 남아 생산계획이 그만큼 과잉으로 잡힌다.
+ *  파일이 다루지 않는 달의 행은 건드리지 않는다 — 판독 파트가 직접 넣은 다른 달 발주를 지우면 안 된다.
+ *  opts가 없으면(예: demoAddOrder) 지우지 않고 기존처럼 추가·변경만 한다.
  */
-function upsertShipRows_(ship, melted) {
+function upsertShipRows_(ship, melted, opts) {
+  opts = opts || {};
   const map = {};
   readShipRows_(ship).forEach(r => { map[shipKey_(r)] = r; });
   let added = 0, updated = 0, unchanged = 0;
+  const inFile = {};
   melted.forEach(m => {
     const k = shipKey_(m);
+    inFile[k] = true;
     const cur = map[k];
     if (!cur) { map[k] = { 품목코드: m.품목코드, 고객사: m.고객사, 출하일: m.출하일, 출하량: m.출하량 }; added++; }
     else if (Math.abs(cur.출하량 - m.출하량) > 1e-9) { cur.출하량 = m.출하량; updated++; }
     else unchanged++;
   });
+
+  /* 파일이 담당하는 달 안에서, 파일에 없는 행을 지운다 */
+  const scope = opts.authoritativeMonths || null;
+  const removedRows = [];
+  if (scope && scope.length) {
+    Object.keys(map).forEach(k => {
+      if (inFile[k]) return;
+      const r = map[k];
+      if (scope.indexOf(monthKey_(r.출하일)) < 0) return;
+      removedRows.push(r);
+      delete map[k];
+    });
+  }
+
   const rows = Object.keys(map).map(k => map[k]).sort(sortShipRows_);
   writeShipRows_(ship, rows);
-  return { added, updated, unchanged, total: rows.length, totalKg: rows.reduce((s, r) => s + r.출하량, 0) };
+  const removedKg = removedRows.reduce((s, r) => s + r.출하량, 0);
+  return {
+    added, updated, unchanged,
+    removed: removedRows.length, removedKg, removedRows,
+    total: rows.length, totalKg: rows.reduce((s, r) => s + r.출하량, 0),
+  };
 }
 
 /** [출하계획] 탭 전체 재작성 — clearContents 후 setValues 1회. 품목코드 텍스트 · 출하일 yyyy-mm-dd · 출하량 천단위 */
@@ -674,8 +717,10 @@ function writeShipRows_(ship, rows) {
 /* ────────────────────────────────────────────────────────────────────────────
  *  외부 소스 폴더 동기화 (선택) — 판독 파트가 프로젝트 루트 "밖" 폴더에서 출고계획을 관리할 때
  *  소스: CFG.ORDER_SOURCE_FOLDER_ID(우선) 또는 [설정] ORDER_SOURCE_FOLDER_ID (폴더 URL/ID 모두 허용)
- *  동작: 소스 아래를 재귀 탐색 → 패턴에 맞고 lastUpdated가 바뀐 파일만 프로젝트 루트의 `출고계획/`로 복사.
- *        복사본이 이미 있으면 파일을 새로 만들지 않고 첫 탭 내용만 덮어써 복사본 URL 유지.
+ *  동작: 소스 아래를 재귀 탐색 → **`X월_출고계획(통합)` 정식 이름**이면서 lastUpdated가 바뀐 파일만
+ *        프로젝트 루트의 `출고계획/`로 복사한다 (사용자 지시 2026-09-04 — 정식 이름만 가져온다).
+ *        복사본이 이미 있으면 파일을 새로 만들지 않고 첫 탭 내용만 덮어써 복사본 URL을 유지하되,
+ *        **이름은 원본 이름으로 맞춘다** — 원본이 이름을 바꿔도 사본이 옛 이름에 굳지 않게.
  *  원본 폴더·파일은 읽기만 한다 — 이동·이름변경·수정 절대 금지. 실패는 경고 후 계속(변환을 죽이지 않음).
  * ──────────────────────────────────────────────────────────────────────────── */
 function syncOrderFiles_(settings) {
@@ -692,15 +737,29 @@ function syncOrderFiles_(settings) {
   catch (e) { res.reason = '소스 폴더 접근 실패'; warn_('동기화', `소스 폴더(${sourceId})에 접근할 수 없습니다 — 공유 권한 확인. 동기화 생략`); return res; }
   res.enabled = true;
 
-  const srcFiles = findFilesByPattern_(source, CFG.ORDER_FILE_PATTERN);
-  if (!srcFiles.length) { res.reason = `소스 폴더 "${source.getName()}"에 패턴에 맞는 파일 없음`; Logger.log('[동기화] ' + res.reason); return res; }
+  /* 소스에서는 `X월_출고계획(통합)` 정식 이름만 가져온다 — 사본·임시본이 딸려 오지 않게 (사용자 지시 2026-09-04) */
+  const srcFiles = findFilesByPattern_(source, CFG.ORDER_FILE_PATTERN_MAIN);
+  if (!srcFiles.length) {
+    res.reason = `소스 폴더 "${source.getName()}"에 정식 이름(X월_출고계획(통합)) 파일 없음`;
+    Logger.log('[동기화] ' + res.reason);
+    return res;
+  }
   const copyFolder = getOrCreateSubFolder_(getMasterFolder_(), CFG.FILE_NAMES.ORDER_COPY_FOLDER);
   const sync = getJsonProp_(CFG.PROP.ORDER_SYNC, {});
   let changed = false;
 
   srcFiles.forEach(f => {
     const stamp = f.lastUpdated.toISOString();
-    const entry = sync[f.id];
+    let entry = sync[f.id];
+    /* 이력이 없거나 가리키는 사본이 사라졌으면, 폴더에서 같은 이름의 사본을 찾아 이어 쓴다.
+     * 이력만 믿으면 속성이 지워졌을 때 사본을 새로 만들어 파일이 여러 개로 갈라진다. */
+    if (!entry || !entry.copyId || checkDriveItem_(entry.copyId, 'file') === 'missing') {
+      const found = findExistingCopy_(copyFolder, f.name);
+      if (found) {
+        entry = { copyId: found.getId(), stamp: '', name: f.name };
+        Logger.log(`[동기화] 기존 사본을 이어서 씁니다 — 출고계획/${found.getName()}`);
+      }
+    }
     const copyAlive = entry && entry.copyId && checkDriveItem_(entry.copyId, 'file') !== 'missing';
     if (entry && copyAlive && entry.stamp === stamp) { res.skipped++; return; }
     try {
@@ -711,6 +770,14 @@ function syncOrderFiles_(settings) {
         const target = copySs.getSheets()[0];
         target.clearContents();
         if (values.length) target.getRange(1, 1, values.length, values[0].length).setValues(values);
+        /* 사본 이름을 원본 이름으로 맞춘다 — 파일 ID는 그대로라 URL은 유지된다.
+         * 이게 없으면 원본이 이름을 바꿔도 사본은 처음 복사할 때의 옛 이름에 굳는다. */
+        const wantName = f.name.replace(/\.xlsx?$/i, '');
+        if (copySs.getName() !== wantName) {
+          const before = copySs.getName();
+          copySs.rename(wantName);
+          Logger.log(`[동기화] 사본 이름 정정: ${before} → ${wantName}`);
+        }
         sync[f.id] = { copyId: entry.copyId, stamp, name: f.name };
         res.updated++;
         Logger.log(`[동기화] 갱신: ${f.folderPath}/${f.name} → 출고계획/${copySs.getName()}`);
@@ -1002,7 +1069,9 @@ function runAll(reason) {
   clearWarnings_();
   try {
     stage = '출고계획 변환';
-    const conv = convertOrderToPlan();
+    /* 변환 알림도 runAll과 같은 실행 주체로 보이게 라벨을 넘긴다 —
+     * 트리거가 감지해 돌린 변환에 '수동실행'이 뜨면 안 된다. */
+    const conv = convertOrderToPlan({ label });
 
     stage = '데이터 로드';
     const data = loadData_();
@@ -1480,7 +1549,7 @@ function demoAddOrder(rows) {
   }));
   const up = upsertShipRows_(ship, use);
   const total = use.reduce((s, r) => s + r.출하량, 0);
-  Logger.log(`[데모] 추가발주 ${use.length}건 ${Math.round(total).toLocaleString()}kg upsert — 추가 ${up.added} · 갱신 ${up.updated} · 동일 ${up.unchanged} → [출하계획] ${up.total}행 ${Math.round(up.totalKg).toLocaleString()}kg`);
+  Logger.log(`[데모] 추가발주 ${use.length}건 ${Math.round(total).toLocaleString()}kg upsert — 추가 ${up.added} · 변경 ${up.updated} · 동일 ${up.unchanged} → [출하계획] ${up.total}행 ${Math.round(up.totalKg).toLocaleString()}kg`);
   use.forEach(r => Logger.log(`  - ${r.품목코드} ${r.고객사} ${dateKey_(r.출하일)} ${Math.round(r.출하량).toLocaleString()}kg`));
   Logger.log('■ 다음: [▶ 생산계획 → 🔄 지금 재계획] 또는 replanFromToday() 실행 (1분 트리거가 설치돼 있으면 자동으로 재계획됨)');
   return { rows: use, upsert: up };
@@ -1524,10 +1593,14 @@ function resetShipPlan() {
     cleared = readShipRows_(ship).length;
     writeShipRows_(ship, []);
   }
-  const keys = [CFG.PROP.ORDER_PROCESSED, CFG.PROP.ORDER_SYNC, CFG.PROP.HASH_SHIP];
+  /* ORDER_SYNC(원본↔사본 짝)는 **지우지 않는다** — 지우면 동기화가 기존 사본을 못 찾아
+   * `출고계획/`에 사본을 새로 만들어 파일이 여러 개로 갈라진다(사용자 지시: 덮어쓰기).
+   * 초기화의 목적인 "출고계획을 처음부터 다시 읽기"는 ORDER_PROCESSED 삭제만으로 달성된다. */
+  const keys = [CFG.PROP.ORDER_PROCESSED, CFG.PROP.HASH_SHIP];
   const props = PropertiesService.getScriptProperties();
   keys.forEach(k => props.deleteProperty(k));
-  Logger.log(`[초기화] 출하계획 ${cleared}행 비움${ship ? '' : ' (출하계획 파일 없음)'} · 속성 삭제: ${keys.join(', ')} → 다음 변환에서 출고계획을 처음부터 다시 읽습니다`);
+  Logger.log(`[초기화] 출하계획 ${cleared}행 비움${ship ? '' : ' (출하계획 파일 없음)'} · 속성 삭제: ${keys.join(', ')}`
+    + ' (동기화 이력은 유지 — 사본을 새로 만들지 않고 덮어쓰기 위함) → 다음 변환에서 출고계획을 처음부터 다시 읽습니다');
   return { cleared, deletedProps: keys, shipUrl: ship ? ship.getUrl() : '' };
 }
 
@@ -1550,7 +1623,7 @@ function testResetAndConvert() {
   const r = resetShipPlan();
   Logger.log(`■ 초기화: 출하계획 ${r.cleared}행 비움 · 처리이력 삭제 → 재변환 시작`);
   const c = testConvertOnly();
-  Logger.log(`■ 재변환 대사: 추가 ${c.added} · 갱신 ${c.updated} · 동일 ${c.unchanged}${c.updated === 0 && c.unchanged === 0 && c.added > 0 ? ' ✓ (전부 신규 추가 — 초기화 정상)' : ' ✗ (초기화 뒤에는 전부 "추가"여야 함)'}${c.shipRows === r.cleared ? ` · 행수 ${c.shipRows} = 초기화 전 ${r.cleared} ✓` : ` · 행수 ${c.shipRows} ≠ 초기화 전 ${r.cleared} (출고계획이 바뀌었으면 정상)`}`);
+  Logger.log(`■ 재변환 대사: 추가 ${c.added} · 변경 ${c.updated} · 동일 ${c.unchanged}${c.updated === 0 && c.unchanged === 0 && c.added > 0 ? ' ✓ (전부 신규 추가 — 초기화 정상)' : ' ✗ (초기화 뒤에는 전부 "추가"여야 함)'}${c.shipRows === r.cleared ? ` · 행수 ${c.shipRows} = 초기화 전 ${r.cleared} ✓` : ` · 행수 ${c.shipRows} ≠ 초기화 전 ${r.cleared} (출고계획이 바뀌었으면 정상)`}`);
   return { reset: r, convert: c };
 }
 

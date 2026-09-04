@@ -10,7 +10,8 @@
 종료 코드
   0 = 위반 없음 / 2 = 위반 발견 (훅에서는 2가 "Claude에게 stderr를 보여주고 수정하게 함")
 
-금지어 목록은 아래 TERMS·PATTERNS만 고치면 된다. 이 파일 자체는 검사 대상에서 제외된다.
+금지어 목록은 같은 폴더의 terms.local.json 에 둔다(저장소 미포함). 패턴은 아래 PATTERNS를 고친다.
+이 파일 자체는 검사 대상에서 제외된다.
 """
 import io
 import json
@@ -23,16 +24,30 @@ sys.stderr.reconfigure(encoding="utf-8")
 
 # ── 1. 금지어 (대소문자 무시) ──────────────────────────────────────────────
 # 실제 고객사명·공정명·실제 품목코드·회사 도메인. 필요하면 여기에 추가.
-TERMS = [
-    # 고객사 실명 → 고객사A/B/C 로만 표기
-    "유라", "경신",
-    # 실제 공정명 → 전부 '집합' 으로만 표기
-    "연선", "신선", "소둔", "연합",
-    # 더미 품목코드가 미러하는 실제 품목코드
-    "S300173", "9002056",
-    # 회사 도메인·사내 시스템 명
-    "s-cable", "도체생산계획",
-]
+# ── 1. 금지어 (대소문자 무시) ──────────────────────────────────────────────
+# 금지어 목록은 **이 파일에 두지 않는다** — 목록 자체가 보호하려는 정보라
+# 저장소에 올라가면 익명화가 통째로 무의미해지기 때문이다.
+# 같은 폴더의 terms.local.json 에서 읽는다 (git 추적 제외. 형식은 terms.example.json 참고).
+SELF = os.path.normpath(os.path.abspath(__file__))
+TERMS_FILE = os.path.join(os.path.dirname(SELF), "terms.local.json")
+
+
+def load_terms():
+    """금지어 목록을 읽는다. 없으면 '검사 못 함'을 분명히 알리고 멈춘다 —
+    목록 없이 통과로 처리하면 검사했다는 착각만 남기 때문이다."""
+    if not os.path.exists(TERMS_FILE):
+        sys.stderr.write(
+            "익명화 검사를 할 수 없습니다 — 금지어 목록이 없습니다.\n"
+            "  %s\n"
+            "  terms.example.json 을 terms.local.json 으로 복사한 뒤 실제 값을 채우세요.\n"
+            "  (이 파일은 저장소에 올리지 않습니다)\n" % TERMS_FILE)
+        sys.exit(2)
+    with io.open(TERMS_FILE, encoding="utf-8") as f:
+        cfg = json.load(f)
+    return cfg.get("terms", []), cfg.get("email_domain_regex", "")
+
+
+TERMS, EMAIL_DOMAIN_RE = load_terms()
 
 # ── 2. 정규식 패턴 (식별자·비밀값) ───────────────────────────────────────────
 PATTERNS = {
@@ -41,7 +56,7 @@ PATTERNS = {
     "GAS 스크립트 URL":       re.compile(r"script\.google\.com/(?:home/)?(?:d|projects)/[A-Za-z0-9_-]{30,}"),
     "Google Chat 웹훅 URL":   re.compile(r"chat\.googleapis\.com/v1/spaces/[A-Za-z0-9_-]+/messages\?key="),
     "텔레그램 봇 토큰":       re.compile(r"\b\d{8,10}:[A-Za-z0-9_-]{35}\b"),
-    "회사 이메일":            re.compile(r"[A-Za-z0-9._%+-]+@s-cable\.co\.kr", re.I),
+    "회사 이메일":            re.compile(r"[A-Za-z0-9._%+-]+@" + EMAIL_DOMAIN_RE, re.I),
 }
 
 # ── 3. 검사 대상 ────────────────────────────────────────────────────────────
@@ -49,8 +64,6 @@ DEFAULT_TARGETS = ["split", "data", "scripts", "docs", ".claude/agents", "."]   
 EXTS = {".gs", ".js", ".json", ".md", ".txt", ".py", ".csv", ".html"}
 XLSX_EXTS = {".xlsx"}   # 셀 값 검사(openpyxl 필요 — 없으면 경고 후 생략)
 EXCLUDE_DIRS = {".git", "node_modules", "__pycache__", ".claude/skills/anon-check"}
-SELF = os.path.normpath(os.path.abspath(__file__))
-
 
 def iter_files(paths):
     for p in paths:
